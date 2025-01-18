@@ -1,0 +1,78 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+ipch/
+*.aps
+*.ncb
+*.obj
+*.opendb
+*.tlog
+*.lastbuildstate
+*.obj
+*.pch
+*.idb
+*.pdb
+*.ilk
+*.log
+*.ipdb
+*.iobj
+*.opensdf
+*.sdf
+
+# Visual Studio Code
+.vscode/
+
+# Build Directories
+Debug/
+Release/
+x64/Debug/
+x64/Release/
+bin/
+build/
+out/
+
+# Temporary and Cache Files
+*.tmp
+*.log
+*.bak
+*.swp
+*.err
+*.lk
+*.d
+*.map
+*.manifest
+*.tlog
+
+# C++ Files
+*.o
+*.obj
+*.so
+*.a
+*.lib
+*.dll
+*.exe
+*.out
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Code Analysis
+*.gcda
+*.gcno
+*.gcov
+
+# IDE Files
+.idea/
+*.iml
+
+# Other Files
+*.DS_Store
+Thumbs.db
