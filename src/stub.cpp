@@ -1,4 +1,4 @@
-#include "Framework.h"
+#include "framework.h"
 
 StubManager::StubManager() : stub_mem(nullptr), stub_mem_size(0) {}
 
@@ -25,6 +25,7 @@ void* StubManager::FetchStub(const std::string& syscall_name) const {
     if (it == syscall_stubs.end()) {
         return nullptr;
     }
+
     return it->second;
 }
 
@@ -35,6 +36,7 @@ void StubManager::CreateStub(void* target_address, uint32_t ssn) {
         0x0F, 0x05,
         0xC3
     };
+
     *reinterpret_cast<uint32_t*>(&stub[4]) = ssn;
     memcpy(target_address, stub, sizeof(stub));
 }
@@ -44,5 +46,6 @@ void* StubManager::AllocX(size_t size) {
     if (!memory) {
         throw std::runtime_error("failed to allocate executable memory");
     }
+
     return memory;
 }

@@ -1,4 +1,4 @@
-#include "Framework.h"
+#include "framework.h"
 
 #include <Windows.h>
 
@@ -25,6 +25,7 @@ void* AllocBuffer(ULONG& buffer_size) {
     if (!buffer) {
         throw std::runtime_error("failed to allocate buffer for system information");
     }
+
     return buffer;
 }
 
@@ -87,5 +88,6 @@ int main() {
     catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << '\n';
     }
+
     return 0;
 }

@@ -1,9 +1,9 @@
-#include "Framework.h"
+#include "framework.h"
 
 #ifdef _M_X64
 constexpr size_t TEB_INSTRUMENTATION_CALLBACK_OFFSET = 0x2F8;
 #else
-#error "This implementation is for x64 only"
+#error "x64 Only"
 #endif
 
 static const unsigned char NewHandler[] = {
