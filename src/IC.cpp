@@ -1,4 +1,4 @@
-#include "framework.h"
+#include "framework.hpp"
 
 #ifdef _M_X64
 constexpr size_t TEB_INSTRUMENTATION_CALLBACK_OFFSET = 0x2F8;

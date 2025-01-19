@@ -15,7 +15,7 @@ set(SOURCES
 )
 
 set(HEADERS
-    src/framework.h
+    src/framework.hpp
 )
 
 add_executable(${PROJECT_NAME} ${SOURCES} ${HEADERS})
