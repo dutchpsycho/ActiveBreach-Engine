@@ -3,7 +3,7 @@
 ## Project Overview
 MDSEC-UM-HookBypass demonstrates a methodology for bypassing user-mode hooks by leveraging direct system call invocation without routing through user-mode API (Eg; NTDLL). The project showcases syscall stub generation by extracting system service numbers (SSNs) from `ntdll.dll` and invoking them directly, bypassing any user-mode hooks placed on any usermode API's. It also includes a routine for handling instrumentation callbacks (IC) in the "target, though this isn't directly integrated within the example.
 
-This is an implementation of MDSEC's blogpost "Bypassing User-Mode Hooks and Direct Invocation of System Calls for Red Teams [ACTIVEBREACH]"
+This is an implementation of MDSEC's blogpost "Bypassing User-Mode Hooks and Direct Invocation of System Calls for Red Teams"
 
 ## What is this useful for?
 
