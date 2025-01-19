@@ -5,6 +5,11 @@ MDSEC-UM-HookBypass demonstrates a methodology for bypassing user-mode hooks by 
 
 This is an implementation of MDSEC's blogpost "Bypassing User-Mode Hooks and Direct Invocation of System Calls for Red Teams [ACTIVEBREACH]"
 
+## What is this useful for?
+
+- The process you are performing "Educational Activities" on has UM hooks set on their ntdll funcs, you don't wanna trip those. Implement this in your DLL to bypass them all, no unhooking/overwrites required.
+- A horrible EDR or Anticheat has set global hooks in the User-Space on your system, you want to (Educationally) get around this. 
+
 ## Requirements:
 - Windows, x64
 - Visual Studio or Cmake to compile
