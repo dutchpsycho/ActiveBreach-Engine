@@ -1,9 +1,8 @@
 #include "framework.h"
 
 #include <Windows.h>
-
-#include <iostream>
 #include <stdexcept>
+#include <iostream>
 
 #ifndef STATUS_SUCCESS
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
@@ -13,19 +12,13 @@
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
 #endif
 
-using NtQuerySystemInformation_t = NTSTATUS(NTAPI*)(
-    ULONG SystemInformationClass,
-    PVOID SystemInformation,
-    ULONG SystemInformationLength,
-    PULONG ReturnLength
-    );
+using NtQuerySystemInformation_t = NTSTATUS(NTAPI*)(ULONG, PVOID, ULONG, PULONG);
 
 void* AllocBuffer(ULONG& buffer_size) {
     void* buffer = VirtualAlloc(nullptr, buffer_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!buffer) {
         throw std::runtime_error("failed to allocate buffer for system information");
     }
-
     return buffer;
 }
 
@@ -88,6 +81,5 @@ int main() {
     catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << '\n';
     }
-
     return 0;
 }

@@ -17,7 +17,7 @@ void* ICManager::ResolveNt(const std::string& functionName) {
         throw std::runtime_error("Failed to get ntdll handle");
     }
 
-    void* func = GetProcAddress(ntdll, functionName.c_str());
+    void* func = reinterpret_cast<void*>(GetProcAddress(ntdll, functionName.c_str()));
     if (!func) {
         throw std::runtime_error("Failed to resolve function: " + functionName);
     }

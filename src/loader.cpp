@@ -1,5 +1,11 @@
 #include "framework.h"
 
+#include <string>
+#include <unordered_map>
+#include <stdexcept>
+#include <string_view>
+#include <vector>
+
 template <typename T>
 class DllMapper {
 public:
@@ -19,14 +25,12 @@ public:
         }
 
         HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
-        
         if (!mapping) {
             CloseHandle(file);
             throw std::runtime_error("failed to create file mapping for: " + std::string(dll_name.begin(), dll_name.end()));
         }
 
         void* mapped_base = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
-
         CloseHandle(mapping);
         CloseHandle(file);
 
@@ -51,7 +55,9 @@ public:
             throw std::runtime_error("invalid nt header signature");
         }
 
-        auto* export_dir = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(static_cast<uint8_t*>(mapped_base) +nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+        auto* export_dir = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(
+            static_cast<uint8_t*>(mapped_base) + nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress
+            );
 
         auto* names = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(mapped_base) + export_dir->AddressOfNames);
         auto* functions = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(mapped_base) + export_dir->AddressOfFunctions);
@@ -64,7 +70,7 @@ public:
                 static_cast<uint8_t*>(mapped_base) + names[i]
                 );
 
-            if (std::string_view(func_name).starts_with("Nt")) {
+            if (std::string_view(func_name).rfind("Nt", 0) == 0) {
                 auto* func_ptr = static_cast<uint8_t*>(mapped_base) + functions[ordinals[i]];
                 if (func_ptr[0] == 0x4C && func_ptr[1] == 0x8B && func_ptr[2] == 0xD1 && func_ptr[3] == 0xB8) {
                     uint32_t ssn = *reinterpret_cast<uint32_t*>(func_ptr + 4);
@@ -130,20 +136,22 @@ std::unordered_map<std::string, uint32_t> NtdllLoader::ExtractSSN(void* mapped_b
         throw std::runtime_error("Invalid NT header signature");
     }
 
-    auto* export_dir = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(static_cast<uint8_t*>(mapped_base) +nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
+    auto* export_dir = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(
+        static_cast<uint8_t*>(mapped_base) + nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress
+        );
 
     auto* names = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(mapped_base) + export_dir->AddressOfNames);
     auto* functions = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(mapped_base) + export_dir->AddressOfFunctions);
     auto* ordinals = reinterpret_cast<uint16_t*>(static_cast<uint8_t*>(mapped_base) + export_dir->AddressOfNameOrdinals);
 
-    std::unordered_map<std::string, uint32_t> syscall_table;    
+    std::unordered_map<std::string, uint32_t> syscall_table;
 
     for (uint32_t i = 0; i < export_dir->NumberOfNames; ++i) {
         const char* func_name = reinterpret_cast<const char*>(
             static_cast<uint8_t*>(mapped_base) + names[i]
             );
 
-        if (std::string_view(func_name).starts_with("Nt")) {
+        if (std::string_view(func_name).rfind("Nt", 0) == 0) {
             auto* func_ptr = static_cast<uint8_t*>(mapped_base) + functions[ordinals[i]];
             if (func_ptr[0] == 0x4C && func_ptr[1] == 0x8B && func_ptr[2] == 0xD1 && func_ptr[3] == 0xB8) {
                 uint32_t ssn = *reinterpret_cast<uint32_t*>(func_ptr + 4);
