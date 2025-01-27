@@ -8,10 +8,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_GENERATOR_PLATFORM x64)
 
 set(SOURCES
-    src/IC.cpp
     src/loader.cpp
     src/master.cpp
     src/stub.cpp
+	src/IC.c
 )
 
 set(HEADERS
