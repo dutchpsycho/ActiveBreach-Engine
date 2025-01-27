@@ -1,28 +1,18 @@
 #include "framework.hpp"
 
-#include <Windows.h>
-#include <stdexcept>
-#include <iostream>
-
-#ifndef STATUS_SUCCESS
-#define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
-#endif
-
-#ifndef STATUS_INFO_LENGTH_MISMATCH
-#define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
-#endif
-
 using NtQuerySystemInformation_t = NTSTATUS(NTAPI*)(ULONG, PVOID, ULONG, PULONG);
+using NtAllocateVirtualMemory_t = NTSTATUS(NTAPI*)(
+    HANDLE, PVOID*, ULONG_PTR, PSIZE_T, ULONG, ULONG);
 
 void* AllocBuffer(ULONG& buffer_size) {
     void* buffer = VirtualAlloc(nullptr, buffer_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!buffer) {
-        throw std::runtime_error("failed to allocate buffer for system information");
+        throw std::runtime_error("Failed to allocate buffer for system information");
     }
     return buffer;
 }
 
-void ExampleCall(NtQuerySystemInformation_t nt_query_sys_info) {
+void ExampleQuerySystemInformation(NtQuerySystemInformation_t nt_query_sys_info) {
     ULONG buffer_size = 0x1000;
     void* buffer = nullptr;
     ULONG return_length = 0;
@@ -52,6 +42,31 @@ void ExampleCall(NtQuerySystemInformation_t nt_query_sys_info) {
     }
 }
 
+void ExampleAllocateVirtualMemory(NtAllocateVirtualMemory_t nt_allocate_vm) {
+    void* base_address = nullptr;
+    SIZE_T region_size = 0x1000;
+    ULONG allocation_type = MEM_COMMIT | MEM_RESERVE;
+    ULONG protect = PAGE_READWRITE;
+
+    NTSTATUS status = nt_allocate_vm(
+        GetCurrentProcess(),
+        &base_address,  
+        0,
+        &region_size,
+        allocation_type,
+        protect
+    );
+
+    if (status == STATUS_SUCCESS) {
+        std::cout << "NtAllocateVirtualMemory succeeded, allocated at: " << base_address
+            << ", size: " << region_size << '\n';
+        VirtualFree(base_address, 0, MEM_RELEASE);
+    }
+    else {
+        std::cerr << "NtAllocateVirtualMemory failed with status: 0x" << std::hex << status << '\n';
+    }
+}
+
 void Run() {
     void* ntdll_base = NtdllLoader::MapDLL();
     auto syscall_table = NtdllLoader::ExtractSSN(ntdll_base);
@@ -67,9 +82,19 @@ void Run() {
     }
 
     std::cout << "NtQuerySystemInformation stub address: " << nt_query_sys_info_stub << '\n';
-
     auto nt_query_sys_info = reinterpret_cast<NtQuerySystemInformation_t>(nt_query_sys_info_stub);
-    ExampleCall(nt_query_sys_info);
+    ExampleQuerySystemInformation(nt_query_sys_info);
+
+    void* nt_allocate_vm_stub = stub_manager.FetchStub("NtAllocateVirtualMemory");
+    if (!nt_allocate_vm_stub) {
+        std::cerr << "NtAllocateVirtualMemory stub not found\n";
+        NtdllLoader::Cleanup(ntdll_base);
+        return;
+    }
+
+    std::cout << "NtAllocateVirtualMemory stub address: " << nt_allocate_vm_stub << '\n';
+    auto nt_allocate_vm = reinterpret_cast<NtAllocateVirtualMemory_t>(nt_allocate_vm_stub);
+    ExampleAllocateVirtualMemory(nt_allocate_vm);
 
     NtdllLoader::Cleanup(ntdll_base);
 }
@@ -79,7 +104,9 @@ int main() {
         Run();
     }
     catch (const std::exception& e) {
-        std::cerr << "error: " << e.what() << '\n';
+        std::cerr << "Error: " << e.what() << '\n';
     }
+
+    std::cin.get();
     return 0;
 }

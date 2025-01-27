@@ -19,13 +19,13 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\IC.cpp" />
+    <ClCompile Include="src\IC.c" />
     <ClCompile Include="src\loader.cpp" />
     <ClCompile Include="src\master.cpp" />
     <ClCompile Include="src\stub.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\framework.h" />
+    <ClInclude Include="src\framework.hpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>

@@ -7,7 +7,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\IC.cpp">
+    <ClCompile Include="src\IC.c">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="src\loader.cpp">
@@ -21,7 +21,7 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\framework.h">
+    <ClInclude Include="src\framework.hpp">
       <Filter>src</Filter>
     </ClInclude>
   </ItemGroup>

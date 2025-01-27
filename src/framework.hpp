@@ -1,7 +1,15 @@
-#ifndef FRAMEWORK_H
-#define FRAMEWORK_H
+#ifndef FRAMEWORK_HPP
+#define FRAMEWORK_HPP
 
 #include <Windows.h>
+
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
+#endif
+
+#ifndef STATUS_INFO_LENGTH_MISMATCH
+#define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
+#endif
 
 #include <unordered_map>
 #include <string>
@@ -100,17 +108,6 @@ public:
     static void* MapDLL();
     static std::unordered_map<std::string, uint32_t> ExtractSSN(void* mapped_base);
     static void Cleanup(void* mapped_base);
-};
-
-class ICManager {
-public:
-    static bool DisableIC(HANDLE processHandle, const std::vector<HANDLE>& threadHandles);
-
-private:
-    static void* ResolveNt(const std::string& functionName);
-    static bool GetIC(HANDLE threadHandle, void*& callbackAddress);
-    static bool RemoveIC(HANDLE processHandle, void* callbackAddress);
-    static bool VerifyCallbackRemoval(HANDLE processHandle, void* callbackAddress);
 };
 
 #endif
