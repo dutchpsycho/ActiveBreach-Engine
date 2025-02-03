@@ -7,6 +7,21 @@ ACTIVEBREACH-UM-HookBypass is an an implementation of a stub based syscall invoc
 
 This demonstrates a methodology for bypassing user-mode hooks by leveraging direct system call invocation without routing through user-mode API or using LoadLibrary, this also gets around breakpoints set on ``ntdll.dll``. The project showcases syscall stub generation by extracting system service numbers (SSNs) from `ntdll.dll` and invoking them directly.
 
+## What is a hook? why do they need to be bypassed?
+On Windows, we have something called the "Windows API" (Windows.h) and the "Native API" (ntdll.dll), Windows API is a wrapper around the Native API, these provide functions not normally accessible (as most transfer to the kernel). For example, if we call "CreateFile" in our process, It'll follow this routine;
+
+CreateFile > NtCreateFile (ntdll.dll) -> IoCreateFileEx (Kernel) -> IopCreateFile (Kernel) -> ... -> Return SUCCESS/STATUS
+
+Now, a hook can be set on any of these calls, a usermode hook in this example could be set on either CreateFile or NtCreateFile (More likely on NtCreateFile as this is the underlying Kernel translation)
+
+The most common hooks will be set at the start of the function Eg; inside of ntdll.dll/kernel32.dll, hooks can detect and block operations running through them.
+
+Now, the flaw with this is that these hooks are only called if you call that processes ntdll.dll/kernel32.dll and it passes through their handler, instead of unhooking or overcomplicating things this project creates its own way to invoke syscalls. (A 'syscall' is a call that requires the Kernel to handle it)
+
+To do this, we need something called an "SSN" (more commonly referred to as a syscall number), we can find these in ntdll.dll's exports/exceptions directorys, and extract them.
+
+Once done, I create a memory stub for each Native API function (extremely small), whenever you use the stub manager it calls these stubs instead of routing through the actual API's, they invoke directly into the Kernel bypassing any hooks in usermode.
+
 ## What is this useful for?
 
 - The process you are performing "Educational Activities" on has UM hooks set on their ntdll funcs, you don't wanna trip those. Implement this in your DLL to bypass them all, no unhooking/overwrites required.
