@@ -77,7 +77,6 @@ void Run() {
     void* nt_query_sys_info_stub = stub_manager.FetchStub("NtQuerySystemInformation");
     if (!nt_query_sys_info_stub) {
         std::cerr << "NtQuerySystemInformation stub not found\n";
-        NtdllLoader::Cleanup(ntdll_base);
         return;
     }
 
@@ -88,15 +87,12 @@ void Run() {
     void* nt_allocate_vm_stub = stub_manager.FetchStub("NtAllocateVirtualMemory");
     if (!nt_allocate_vm_stub) {
         std::cerr << "NtAllocateVirtualMemory stub not found\n";
-        NtdllLoader::Cleanup(ntdll_base);
         return;
     }
 
     std::cout << "NtAllocateVirtualMemory stub address: " << nt_allocate_vm_stub << '\n';
     auto nt_allocate_vm = reinterpret_cast<NtAllocateVirtualMemory_t>(nt_allocate_vm_stub);
     ExampleAllocateVirtualMemory(nt_allocate_vm);
-
-    NtdllLoader::Cleanup(ntdll_base);
 }
 
 int main() {

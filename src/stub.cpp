@@ -2,8 +2,9 @@
 
 StubManager::StubManager() : stub_mem(nullptr), stub_mem_size(0) {}
 
+// oop
 StubManager::~StubManager() {
-    if (stub_mem) {
+    if (stub_mem) { // i never release but i heard it can be a good practise
         VirtualFree(stub_mem, 0, MEM_RELEASE);
     }
 }
@@ -40,6 +41,7 @@ void StubManager::CreateStub(void* target_address, uint32_t ssn) {
     memcpy(target_address, stub, sizeof(stub));
 }
 
+// one time a nerd told me if its over 5 lines it should be modular
 void* StubManager::AllocX(size_t size) {
     void* memory = VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!memory) {
