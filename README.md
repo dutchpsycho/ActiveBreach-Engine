@@ -26,8 +26,112 @@ So, using this concept our call looks like this;
 
 This effectively bypasses any hooks set within the userspace, though this will do nothing against Kernel hooks.
 
-## What is this useful for?
+## **How do I use this? (C & C++)
 
+## **C++ Side Usage**
+### **1. Include the Header & Source file**
+Ensure you include the `ActiveBreach.hpp` file in your project:
+```cpp
+#include <ActiveBreach.hpp>
+```
+Make sure Activebreach.hpp is linked.
+
+### **2. Initialize ActiveBreach**
+Before making any syscalls, initialize the system using:
+```cpp
+ActiveBreach_launch("LMK"); // Optional "LMK" argument will print "ACTIVEBREACH OPERATIONAL"
+```
+This function:
+- Maps `ntdll.dll`
+- Extracts syscall numbers (SSNs)
+- Builds syscall stubs
+- Sets up the ActiveBreach system
+
+### **3. Making a System Call**
+Use the `ab_call` macro to make syscalls dynamically. The caller **must** provide:
+- The NT function type
+- The syscall name
+- The required arguments
+
+#### **Example: NtQuerySystemInformation**
+```cpp
+using NtQuerySystemInformation_t = NTSTATUS(NTAPI*)(ULONG, PVOID, ULONG, PULONG);
+
+ULONG buffer_size = 0x1000;
+PVOID buffer = VirtualAlloc(nullptr, buffer_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+if (!buffer) {
+    std::cerr << "Failed to allocate buffer" << std::endl;
+    return 1;
+}
+ULONG return_length = 0;
+
+NTSTATUS status = ab_call(NtQuerySystemInformation_t, "NtQuerySystemInformation",
+    5, buffer, buffer_size, &return_length);
+
+if (status == STATUS_SUCCESS) {
+    std::cout << "NtQuerySystemInformation succeeded, return length: " << return_length << std::endl;
+} else {
+    std::cerr << "NtQuerySystemInformation failed with status: 0x" << std::hex << status << std::endl;
+}
+VirtualFree(buffer, 0, MEM_RELEASE);
+```
+
+### **4. Cleanup**
+Cleanup is handled **automatically** at program exit. You do not need to manually free resources.
+
+---
+
+## **C Side Usage**
+### **1. Include the Header**
+Ensure you include the `ActiveBreach.h` file in your project:
+```c
+#include "ActiveBreach.h"
+```
+
+### **2. Initialize ActiveBreach**
+Before making syscalls, initialize the system:
+```c
+ActiveBreach_launch();
+```
+This function:
+- Maps `ntdll.dll`
+- Extracts syscall numbers (SSNs)
+- Builds syscall stubs
+- Sets up the ActiveBreach system
+
+### **3. Making a System Call**
+Use the `ab_call` macro to make syscalls dynamically. The caller **must** provide:
+- The NT function type
+- The syscall name
+- The required arguments
+
+#### **Example: NtQuerySystemInformation**
+```c
+typedef NTSTATUS(NTAPI* NtQuerySystemInformation_t)(ULONG, PVOID, ULONG, PULONG);
+
+ULONG buffer_size = 0x1000;
+PVOID buffer = VirtualAlloc(NULL, buffer_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+if (!buffer) {
+    fprintf(stderr, "Failed to allocate buffer\n");
+    return 1;
+}
+ULONG return_length = 0;
+
+NTSTATUS status = ab_call(NtQuerySystemInformation_t, "NtQuerySystemInformation",
+    5, buffer, buffer_size, &return_length);
+
+if (status == STATUS_SUCCESS) {
+    printf("NtQuerySystemInformation succeeded, return length: %lu\n", return_length);
+} else {
+    fprintf(stderr, "NtQuerySystemInformation failed with status: 0x%lx\n", status);
+}
+VirtualFree(buffer, 0, MEM_RELEASE);
+```
+
+### **4. Cleanup**
+ActiveBreach will **automatically clean up** allocated resources when the program exits.
+
+<<<<<<< Updated upstream
 - The process you are performing "Educational Activities" on has usermode hooks set on functions, you don't wanna trip those. Implement this in your DLL to bypass them all, no unhooking/overwrites required.
 - You don't want your process to be debugged, this'll bypass any breakpoints *(BPs)* on your process.
 - A horrible AntiVirus has set global usermode hooks, you wanna get around that.
@@ -42,6 +146,8 @@ This effectively bypasses any hooks set within the userspace, though this will d
 
 Actual instructions; (args are pre-loaded bc of x64 fastcalls)
 Moves *rcx* into *r10*, loads **SSN** into *eax*, executes *syscall* then *ret*.
+=======
+>>>>>>> Stashed changes
 
 ## Requirements:
 - Windows, 11, x64 (Pending Win10 Compatibility)
