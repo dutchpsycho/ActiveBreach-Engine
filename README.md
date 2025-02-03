@@ -44,8 +44,8 @@ Actual instructions; (args are pre-loaded bc of x64 fastcalls)
 Moves *rcx* into *r10*, loads **SSN** into *eax*, executes *syscall* then *ret*.
 
 ## Requirements:
-- Windows, 11, x64 (Pending Win10 Comptability)
-- Visual Studio
+- Windows, 11, x64 (Pending Win10 Compatibility)
+- Visual Studio, C++ 17
 
 ### Compiling
 1. Open `HookBypass.sln` in Visual Studio.
