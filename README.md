@@ -8,19 +8,23 @@ ACTIVEBREACH-UM-HookBypass is an an implementation of a stub based syscall invoc
 This demonstrates a methodology for bypassing user-mode hooks by leveraging direct system call invocation without routing through user-mode API or using LoadLibrary, this also gets around breakpoints set on ``ntdll.dll``. The project showcases syscall stub generation by extracting system service numbers (SSNs) from `ntdll.dll` and invoking them directly.
 
 ## What is a hook? why do they need to be bypassed?
-On Windows, we have something called the "Windows API" (Windows.h) and the "Native API" (ntdll.dll), Windows API is a wrapper around the Native API, these provide functions not normally accessible (as most transfer to the kernel). For example, if we call "CreateFile" in our process, It'll follow this routine;
+On Windows, we have something called the "Windows API" (Windows.h) and the "Native API" (ntdll.dll), Windows API is a wrapper around the Native API, these provide functions not normally accessible (as most transfer to the kernel). For example, if we call "CreateFile", It'll follow this routine;
 
-CreateFile > NtCreateFile (ntdll.dll) -> IoCreateFileEx (Kernel) -> IopCreateFile (Kernel) -> ... -> Return SUCCESS/STATUS
+CreateFile (Kernel32.dll) > NtCreateFile (ntdll.dll) -> Kernel -> Return STATUSCODE
 
-Now, a hook can be set on any of these calls, a usermode hook in this example could be set on either CreateFile or NtCreateFile (More likely on NtCreateFile as this is the underlying Kernel translation)
+Now, a hook can be set on any of the calls in the sequence, a usermode hook in this example could be set on either CreateFile or NtCreateFile (More likely on NtCreateFile as this is the underlying Kernel translation), a usermode hook cannot be set on the Kernel calls.
 
-The most common hooks will be set at the start of the function Eg; inside of ntdll.dll/kernel32.dll, hooks can detect and block operations running through them.
+The most common hooks will be set at the start of the function eg; a couple bytes replaced at the start of the ntdll.dll function re-routing the call to that EDR/AntiCheat's own handler 
 
-Now, the flaw with this is that these hooks are only called if you call that processes ntdll.dll/kernel32.dll and it passes through their handler, instead of unhooking or overcomplicating things this project creates its own way to invoke syscalls. (A 'syscall' is a call that requires the Kernel to handle it)
+Now, the flaw with this is that these hooks are only called if you make calls through that processes API and it passes through their DLL's, instead of overcomplicating and risking unhooking, we can instead make calls directly to the Kernel through SSN's.
 
-To do this, we need something called an "SSN" (more commonly referred to as a syscall number), we can find these in ntdll.dll's exports/exceptions directorys, and extract them.
+To do this, we need something called an "SSN" (a Syscall Number), we can find these in DLL's like ntdll.dll, each Syscall has its own number, if you have the number you can call it directly through a stub, without passing through any user-mode APIs (This'll still pass through the Kernel-side)
 
-Once done, I create a memory stub for each Native API function (extremely small), whenever you use the stub manager it calls these stubs instead of routing through the actual API's, they invoke directly into the Kernel bypassing any hooks in usermode.
+So, using this concept our call looks like this;
+
+NtCreateFile (Own process Stub) -> Kernel -> Return STATUSCODE
+
+This effectively bypasses any hooks set within the userspace, though this will do nothing against Kernel hooks.
 
 ## What is this useful for?
 
