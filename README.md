@@ -9,7 +9,8 @@ This demonstrates a methodology for bypassing user-mode hooks by leveraging dire
 
 ## What is a hook? why do they need to be bypassed?
 On Windows, we have something called the **Windows API** *(Windows.h)* and the **Native API** *(ntdll.dll)*, **Windows API** is a wrapper around the **Native API**, these provide functions not normally accessible (as most transfer to the Kernel). For example, if we call **CreateFile**, It'll follow this routine;
-*The proper naming convention is the NtApi and WinApi*
+
+<sub>The proper naming convention is the NtApi and WinApi</sub>
 
 ``CreateFile (Kernel32.dll) > NtCreateFile (ntdll.dll) -> Kernel -> Return STATUSCODE``
 
