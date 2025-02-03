@@ -8,9 +8,7 @@ ACTIVEBREACH-UM-HookBypass is an an implementation of a stub based syscall invoc
 This demonstrates a methodology for bypassing user-mode hooks by leveraging direct system call invocation without routing through user-mode API or using LoadLibrary, this also gets around breakpoints set on ``ntdll.dll``. The project showcases syscall stub generation by extracting system service numbers (SSNs) from `ntdll.dll` and invoking them directly.
 
 ## What is a hook? why do they need to be bypassed?
-On Windows, we have something called the **Windows API** *(Windows.h)* and the **Native API** *(ntdll.dll)*, **Windows API** is a wrapper around the **Native API**, these provide functions not normally accessible (as most transfer to the Kernel). For example, if we call **CreateFile**, It'll follow this routine;
-
-<sub>The proper naming convention is the NtApi and WinApi</sub>
+On Windows, we have something called the **Windows API** *(WinApi/Windows.h)* and the **Native API** *(NtApi/ntdll.dll)*, **Windows API** is a wrapper around the **Native API**, these provide functions not normally accessible (as most transfer to the Kernel). For example, if we call **CreateFile**, It'll follow this routine;
 
 ``CreateFile (Kernel32.dll) > NtCreateFile (ntdll.dll) -> Kernel -> Return STATUSCODE``
 
