@@ -28,51 +28,28 @@ This effectively bypasses any hooks set within the userspace, though this will d
 
 ## What is this useful for?
 
-- The process you are performing "Educational Activities" on has UM hooks set on their ntdll funcs, you don't wanna trip those. Implement this in your DLL to bypass them all, no unhooking/overwrites required.
-- You don't want your process to be debugged, this'll bypass BP's on ``ntdll.dll`` functions.
-- A horrible EDR or Anticheat has set global hooks in the User-Space on your system, you want to (Educationally) get around this. 
+- The process you are performing "Educational Activities" on has usermode hooks set on functions, you don't wanna trip those. Implement this in your DLL to bypass them all, no unhooking/overwrites required.
+- You don't want your process to be debugged, this'll bypass any breakpoints *(BPs)* on your process.
+- A horrible AntiVirus has set global usermode hooks, you wanna get around that.
+
+## How does this work under the hood?
+
+1. **ntdll.dll** is found in *System32*, then mapped into our processes private memory.
+2. **ntdll's** exports are found, **SSN**'s are extracted and referenced against exceptions directory (way of checking for global hooks)
+3. this is given to the stub manager, which then generates a stub for each syscall (around ~500 syscalls, total ~8kb mem)
+4. when fetchstub is called, stub manager will get the relevant stub, then cast to the function ptr type.
+5. this then loads the **syscall** args + **SSN**, then fires the syscall with **syscall** instruction & returns the status code (As any normal API would)
+
+Actual instructions; (args are pre-loaded bc of x64 fastcalls)
+Moves *rcx* into *r10*, loads **SSN** into *eax*, executes *syscall* then *ret*.
 
 ## Requirements:
-- Windows, x64
-- Visual Studio or Cmake to compile
+- Windows, 11, x64 (Pending Win10 Comptability)
+- Visual Studio
 
-## Features;
-- Extracts **system service numbers (SSNs)** directly from `ntdll.dll` export's table (EAT)
-- Generates **syscall stubs** to invoke syscalls directly, avoiding user-mode hooks, this is done by creating the same stub that would be seen in `ntdll.dll`, but for our own process.
-
-## Fundementals
-
-### **System Service Number (SSN) Extraction**
-The project identifies system service numbers from the `ntdll.dll` export table:
-1. Maps `ntdll.dll` into memory using `CreateFileMapping` and `MapViewOfFile`, if this was done through LoadLibrary it is likely to be flagged by EDR/AC.
-2. PE Validation
-3. Parses the export directory to locate functions prefixed with `Nt`.
-4. Extracts SSNs by analyzing the function prologue;
-   - `mov r10, rcx`
-   - `mov eax, <SSN>`
-   - `syscall`
-5. Stores SSNs in a mapping of syscall names to their corresponding number.
-
-### **Direct Syscall Invocation**
-By bypassing user-mode APIs (e.g., `NtQuerySystemInformation`), the project avoids user-mode hooks placed by EDR/AC/Debuggers
-- Allocates executable memory to store syscall stubs.
-- Constructs stubs dynamically with the extracted SSN.
-- Executes syscalls directly to the Kernel.
-
-### **User-Mode Hooks and Instrumentation Callbacks**
-- **User-Mode Hooks**: Often implemented by intercepting calls to functions in `ntdll.dll`, such as `NtQuerySystemInformation`, and redirecting them to malicious or monitoring code. These hooks can be bypassed by avoiding the hooked API entirely and directly invoking the syscall.
-- **Instrumentation Callbacks**: Sometimes anti-tamper systems use callbacks in the TEB to intercept & validate thread ops. While this is outside the primary scope of the project, the `ICManager` utility provides a routine to identify and disable some general callbacks.
-
-## Build Instructions
-
-C++ 17.
-
-### Using Visual Studio
+### Compiling
 1. Open `HookBypass.sln` in Visual Studio.
 2. Build the solution (Release)
 
-### Using CMake
-Run Compile.bat
-
 ## Disclaimer
-I am not responsible for anything done with this code. It is provided under public domain and is free-use, what users do with this falls under their personal obligations. I do not condone unethical use of this project, you are liable for your actions.
+I am not responsible for anything done with this code. It is provided under public domain and is free-use, what users do with this falls under their personal obligations. I do not condone unethical use of this project, you are liable for your own actions.
