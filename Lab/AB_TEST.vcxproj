@@ -137,7 +137,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\C\ActiveBreach.c" />
+    <ClCompile Include="..\Include\ActiveBreach.c" />
     <ClCompile Include="C_test.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

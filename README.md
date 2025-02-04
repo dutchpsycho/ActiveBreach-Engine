@@ -26,20 +26,21 @@ So, using this concept our call looks like this;
 
 This effectively bypasses any hooks set within the userspace, though this will do nothing against Kernel hooks.
 
-## How do I use this? (C & C++)
+# **Using ActiveBreach (C & C++)**
 
-## **C/C++ Usage w/ include**
-### **1. Include the Header & Source file**
-Ensure you include the `ActiveBreach.hpp` file in your project:
+## **C++ Usage (ActiveBreach.hpp & ActiveBreach.cpp)**
+
+### **1. Include the Header File**
+Include the `ActiveBreach.hpp` file in your project:
 ```cpp
 #include <ActiveBreach.hpp>
 ```
-Make sure Activebreach.hpp is linked.
+Ensure `ActiveBreach.hpp` and `ActiveBreach.cpp` are properly linked.
 
 ### **2. Initialize ActiveBreach**
 Before making any syscalls, initialize the system using:
 ```cpp
-ActiveBreach_launch("LMK"); // Optional "LMK" argument will print "ACTIVEBREACH OPERATIONAL"
+ActiveBreach_launch("LMK"); // Optional "LMK" argument prints "ACTIVEBREACH OPERATIONAL"
 ```
 This function:
 - Maps `ntdll.dll`
@@ -48,26 +49,58 @@ This function:
 - Sets up the ActiveBreach system
 
 ### **3. Making a System Call**
-Use the `ab_call` macro to make syscalls dynamically. The caller **must** provide:
+Use the `ab_call` macro to dynamically invoke syscalls. The caller must provide:
 - The NT function type
 - The syscall name
 - The required arguments
 
-#### **Example: NtQuerySystemInformation** (Through C include files)
+#### **Example: NtQuerySystemInformation**
 ```cpp
+NTSTATUS status;
 status = ab_call(NtQuerySystemInformation_t, "NtQuerySystemInformation", infoClass, buffer, bufferSize, &returnLength);
 ```
-
-Make sure you call ``ActiveBreach_launch``, as this initializes the ActiveBreach system.
+Ensure `ActiveBreach_launch()` is called before making syscalls.
 
 ### **4. Cleanup**
-Cleanup is handled **automatically** at program exit. You do not need to manually free resources.
+Cleanup is handled **automatically** at program exit. No manual resource deallocation is required.
 
 ---
 
-- The process you are performing "Educational Activities" on has usermode hooks set on functions, you don't wanna trip those. Implement this in your DLL to bypass them all, no unhooking/overwrites required.
-- You don't want your process to be debugged, this'll bypass any breakpoints *(BPs)* on your process.
-- A horrible AntiVirus has set global usermode hooks, you wanna get around that.
+## **C & C++ Universal Usage (ActiveBreach.h & ActiveBreach.c)**
+
+### **1. Include the Header File**
+For universal C and C++ projects, include the `ActiveBreach.h` file:
+```c
+#include "ActiveBreach.h"
+```
+Ensure `ActiveBreach.h` and `ActiveBreach.c` are properly linked.
+
+### **2. Initialize ActiveBreach**
+Before making any syscalls, initialize the system using:
+```c
+ActiveBreach_launch();
+```
+This function:
+- Maps `ntdll.dll`
+- Extracts syscall numbers (SSNs)
+- Builds syscall stubs
+- Sets up the ActiveBreach system
+
+### **3. Making a System Call**
+Use the `ab_call` macro to dynamically invoke syscalls. The caller must provide:
+- The NT function type
+- The syscall name
+- The required arguments
+
+#### **Example: NtQuerySystemInformation**
+```c
+NTSTATUS status;
+ab_call(NtQuerySystemInformation_t, "NtQuerySystemInformation", status, infoClass, buffer, bufferSize, &returnLength);
+```
+Ensure `ActiveBreach_launch()` is called before making syscalls.
+
+### **4. Cleanup**
+Cleanup is handled **automatically** at program exit. You do not need to manually free resources.
 
 ## How does this work under the hood?
 
@@ -79,8 +112,6 @@ Cleanup is handled **automatically** at program exit. You do not need to manuall
 
 Actual instructions; (args are pre-loaded bc of x64 fastcalls)
 Moves *rcx* into *r10*, loads **SSN** into *eax*, executes *syscall* then *ret*.
-=======
->>>>>>> Stashed changes
 
 ## Requirements:
 - Windows, 11, x64 (Pending Win10 Compatibility)

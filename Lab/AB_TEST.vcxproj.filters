@@ -18,7 +18,7 @@
     <ClCompile Include="C_test.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\C\ActiveBreach.c">
+    <ClCompile Include="..\Include\ActiveBreach.c">
       <Filter>External</Filter>
     </ClCompile>
   </ItemGroup>
