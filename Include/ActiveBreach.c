@@ -1,7 +1,9 @@
 #include "ActiveBreach.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <windows.h>
 
 #ifdef _MSC_VER
 #define NORETURN __declspec(noreturn)
@@ -12,6 +14,34 @@
 static NORETURN void fatal_err(const char* msg) {
     fprintf(stderr, "%s\n", msg);
     exit(1);
+}
+
+void ZeroOutSections(void* mapped_base) {
+    IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)mapped_base;
+    if (dos_header->e_magic != IMAGE_DOS_SIGNATURE) {
+        fatal_err("invalid dos header signature");
+    }
+
+    IMAGE_NT_HEADERS* nt_headers = (IMAGE_NT_HEADERS*)((uint8_t*)mapped_base + dos_header->e_lfanew);
+    if (nt_headers->Signature != IMAGE_NT_SIGNATURE) {
+        fatal_err("invalid nt header signature");
+    }
+
+    IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt_headers);
+    for (int i = 0; i < nt_headers->FileHeader.NumberOfSections; ++i, ++section) {
+        char section_name[9] = { 0 };
+        memcpy(section_name, section->Name, 8);
+
+        if (strcmp(section_name, ".text") != 0 && strcmp(section_name, ".rdata") != 0) {
+            void* section_addr = (void*)((uint8_t*)mapped_base + section->VirtualAddress);
+
+            DWORD old_protection;
+            if (VirtualProtect(section_addr, section->Misc.VirtualSize, PAGE_READWRITE, &old_protection)) {
+                memset(section_addr, 0, section->Misc.VirtualSize);
+                VirtualProtect(section_addr, section->Misc.VirtualSize, old_protection, &old_protection);
+            }
+        }
+    }
 }
 
 void* MapNtdll(void) {
@@ -110,7 +140,8 @@ void CleanupNtdll(void* mapped_base) {
 }
 
 void ActiveBreach_Init(ActiveBreach* ab) {
-    if (!ab) fatal_err("ActiveBreach pointer is NULL");
+    if (!ab)
+        fatal_err("ActiveBreach pointer is NULL");
     ab->stub_mem = NULL;
     ab->stub_mem_size = 0;
     ab->stubs = NULL;
@@ -194,6 +225,10 @@ void ActiveBreach_Free(ActiveBreach* ab) {
 // global instance
 ActiveBreach g_ab;
 
+void ActiveBreach_Cleanup(void) {
+    ActiveBreach_Free(&g_ab);
+}
+
 void ActiveBreach_launch(void) {
     void* ntdll_base = MapNtdll();
     SyscallTable table = GetSyscallTable(ntdll_base);
@@ -211,7 +246,7 @@ void ActiveBreach_launch(void) {
         free(table.entries);
     }
 
-    atexit((void(*)(void))ActiveBreach_Free);
+    atexit(ActiveBreach_Cleanup);
 }
 
 /* --- Example AB_CALL (C) ---
@@ -252,8 +287,6 @@ void ab_call_NtQuerySysInfo(void) {
     }
 }
 
-
-// both for testing
 /*
 void Run(void) {
     ActiveBreach_launch();

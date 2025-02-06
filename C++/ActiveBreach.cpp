@@ -80,7 +80,39 @@ namespace {
             if (!mapped_base) {
                 throw std::runtime_error("Failed to map ntdll.dll into memory");
             }
+
+            ZeroOutSections(mapped_base);
+
             return mapped_base;
+        }
+
+        static void ZeroOutSections(void* mapped_base) {
+            auto* dos_header = reinterpret_cast<IMAGE_DOS_HEADER*>(mapped_base);
+            if (dos_header->e_magic != IMAGE_DOS_SIGNATURE) {
+                throw std::runtime_error("invalid DOS header signature");
+            }
+            auto* nt_headers = reinterpret_cast<IMAGE_NT_HEADERS*>(
+                reinterpret_cast<uint8_t*>(mapped_base) + dos_header->e_lfanew);
+            if (nt_headers->Signature != IMAGE_NT_SIGNATURE) {
+                throw std::runtime_error("invalid NT header signature");
+            }
+
+            auto* section = IMAGE_FIRST_SECTION(nt_headers);
+            for (int i = 0; i < nt_headers->FileHeader.NumberOfSections; ++i, ++section) {
+                std::string section_name(reinterpret_cast<char*>(section->Name), 8);
+
+                if (section_name != ".text" && section_name != ".rdata") {
+                    void* section_addr = reinterpret_cast<void*>(
+                        reinterpret_cast<uint8_t*>(mapped_base) + section->VirtualAddress);
+
+                    DWORD old_protection;
+                    if (VirtualProtect(section_addr, section->Misc.VirtualSize, PAGE_READWRITE, &old_protection)) {
+                        std::memset(section_addr, 0, section->Misc.VirtualSize);
+
+                        VirtualProtect(section_addr, section->Misc.VirtualSize, old_protection, &old_protection);
+                    }
+                }
+            }
         }
 
         static std::unordered_map<std::string, uint32_t> ExtractSSN(void* mapped_base) {
@@ -89,21 +121,29 @@ namespace {
             if (dos_header->e_magic != IMAGE_DOS_SIGNATURE) {
                 throw std::runtime_error("Invalid DOS header signature");
             }
-            auto* nt_headers = reinterpret_cast<IMAGE_NT_HEADERS*>(reinterpret_cast<uint8_t*>(mapped_base) + dos_header->e_lfanew);
+            auto* nt_headers = reinterpret_cast<IMAGE_NT_HEADERS*>(
+                reinterpret_cast<uint8_t*>(mapped_base) + dos_header->e_lfanew);
             if (nt_headers->Signature != IMAGE_NT_SIGNATURE) {
                 throw std::runtime_error("Invalid NT header signature");
             }
-            auto* export_dir = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(reinterpret_cast<uint8_t*>(mapped_base) +
+
+            auto* export_dir = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(
+                reinterpret_cast<uint8_t*>(mapped_base) +
                 nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
-            auto* names = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(mapped_base) + export_dir->AddressOfNames);
-            auto* functions = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(mapped_base) + export_dir->AddressOfFunctions);
-            auto* ordinals = reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(mapped_base) + export_dir->AddressOfNameOrdinals);
+            auto* names = reinterpret_cast<uint32_t*>(
+                reinterpret_cast<uint8_t*>(mapped_base) + export_dir->AddressOfNames);
+            auto* functions = reinterpret_cast<uint32_t*>(
+                reinterpret_cast<uint8_t*>(mapped_base) + export_dir->AddressOfFunctions);
+            auto* ordinals = reinterpret_cast<uint16_t*>(
+                reinterpret_cast<uint8_t*>(mapped_base) + export_dir->AddressOfNameOrdinals);
 
             for (uint32_t i = 0; i < export_dir->NumberOfNames; ++i) {
-                std::string func_name(reinterpret_cast<char*>(reinterpret_cast<uint8_t*>(mapped_base) + names[i]));
+                std::string func_name(reinterpret_cast<char*>(
+                    reinterpret_cast<uint8_t*>(mapped_base) + names[i]));
+
                 if (func_name.rfind("Nt", 0) == 0) {
-                    uint32_t ssn = *reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(mapped_base) +
-                        functions[ordinals[i]] + 4);
+                    uint32_t ssn = *reinterpret_cast<uint32_t*>(
+                        reinterpret_cast<uint8_t*>(mapped_base) + functions[ordinals[i]] + 4);
                     syscall_table[func_name] = ssn;
                 }
             }

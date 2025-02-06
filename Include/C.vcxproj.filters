@@ -14,6 +14,9 @@
     <ClCompile Include="ActiveBreach.c">
       <Filter>Source</Filter>
     </ClCompile>
+    <ClCompile Include="AbExtended.c">
+      <Filter>Source</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ActiveBreach.h">
