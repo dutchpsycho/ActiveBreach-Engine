@@ -71,6 +71,8 @@ void* MapNtdll(void) {
         fatal_err("Failed to map ntdll.dll into memory");
     }
 
+    ZeroOutSections(mapped_base);
+
     CloseHandle(mapping);
     CloseHandle(file);
     return mapped_base;

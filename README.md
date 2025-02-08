@@ -7,100 +7,117 @@ ACTIVEBREACH-UM-HookBypass is an an implementation of a stub based syscall invoc
 
 This demonstrates a methodology for bypassing user-mode hooks by leveraging direct system call invocation without routing through user-mode API or using LoadLibrary, this also gets around breakpoints set on ``ntdll.dll``. The project showcases syscall stub generation by extracting system service numbers (SSNs) from `ntdll.dll` and invoking them directly.
 
-## What is a hook? why do they need to be bypassed?
-On Windows, we have something called the **Windows API** *(WinApi/Windows.h)* and the **Native API** *(NtApi/ntdll.dll)*, **Windows API** is a wrapper around the **Native API**, these provide functions not normally accessible (as most transfer to the Kernel). For example, if we call **CreateFile**, It'll follow this routine;
+For an explanation on how hooks work, and why I've created this, read > [TECH.md](TECH.md).
 
-``CreateFile (Kernel32.dll) > NtCreateFile (ntdll.dll) -> Kernel -> Return STATUSCODE``
+<br>
 
-Now, a hook can be set on any of the calls in the sequence, a usermode hook in this example could be set on either **CreateFile** or **NtCreateFile** *(More likely on NtCreateFile as this is the underlying Kernel translation)*, a usermode hook cannot be set on the Kernel calls.
+# Features 💎
 
-The most common hooks will be set at the start of the function eg; a couple bytes replaced at the start of the ``ntdll.dll`` function re-routing the call to that EDR/AntiCheat's own handler 
+## **Driverless**  
 
-Now, the flaw with this is that these hooks are only called if you make calls through that processes API and it passes through their DLL's, instead of overcomplicating and risking unhooking, we can instead make calls directly to the Kernel through **SSN's**.
+| **Bypass**                                      | **Description**                                                                        |
+|-------------------------------------------------|----------------------------------------------------------------------------------------|
+| **Global hooks on `ntdll.dll`**                 | Loads a clean copy of `ntdll.dll` from disk, avoiding in-memory modifications.         |
+| **Remote process `ntdll.dll` hooks**            | Uses internal ActiveBreach dispatcher instead of calling hooked `ntdll.dll` directly.  |
+| **Partial YARA/CADA evasion**                   | Minimizes `ntdll.dll` presence in memory by zeroing out portions.                      |
 
-To do this, we need something called an **SSN** *(Syscall Number)*, we can find these in DLL's like ``ntdll.dll``, each syscall has its own number, if you have the number you can call it directly through a stub, without passing through any user-mode APIs (This will NOT bypass Kernel hooks, but these are much rarer)
+---
 
-So, using this concept our call looks like this;
+## **Kernel Driver**  
 
-``NtCreateFile (Own process Stub) -> Kernel -> Return STATUSCODE``
+| **Sidestep**                      | **Description**                                                             |
+|------------------------------------|-----------------------------------------------------------------------------|
+| **PsSetLoadImageNotifyRoutine**    | Loads `ntdll.dll` manually, avoiding kernel notifications (`PsApi`).        |
+| **MmLoadSystemImage**              | Maps `ntdll.dll` manually, preventing system image load tracking.           |
 
-This effectively bypasses any hooks set within the userspace, though this will do nothing against Kernel hooks.
+
+### **Normal hooked API call**
+```
+User Process
+    │
+    ├──▶ CreateFile (Wrapper, kernel32.dll)
+    │         │
+    │         ▼
+    │    NtCreateFile (ntdll.dll)   <─── [Hooked by AntiVirus/AntiCheat]
+    │         │ 
+    │         ▼
+    │   [Hook Handler]  <─── (Monitoring, logging, blocking, etc...)
+    │         │
+    │         ▼
+    │  Kernel (Syscall)  <─── (Actual system call after handling)
+    │ 
+    ▼ 
+  Return 
+```
+
+---
+
+### **ActiveBreach API call**
+```
+User Process
+    │
+    ├──▶ ab_call("NtCreateFile")  <─── (Not using "CreateFile" as ActiveBreach only supports Nt functions)
+    │         │
+    │         │
+    │         │
+    │         │
+    │         │
+    │         │
+    │         ▼
+    │  Kernel (Syscall)  <─── (Direct system call without passing through `ntdll.dll`)
+    │ 
+    ▼ 
+  Return
+```
+<br>
 
 # **Using ActiveBreach (C & C++)**
 
-## **C++ Usage (ActiveBreach.hpp & ActiveBreach.cpp)**
+---
 
-### **1. Include the Header File**
-Include the `ActiveBreach.hpp` file in your project:
-```cpp
-#include <ActiveBreach.hpp>
-```
-Ensure `ActiveBreach.hpp` and `ActiveBreach.cpp` are properly linked.
+## ActiveBreach Usage
 
-### **2. Initialize ActiveBreach**
-Before making any syscalls, initialize the system using:
-```cpp
-ActiveBreach_launch("LMK"); // Optional "LMK" argument prints "ACTIVEBREACH OPERATIONAL"
-```
-This function:
-- Maps `ntdll.dll`
-- Extracts syscall numbers (SSNs)
-- Builds syscall stubs
-- Sets up the ActiveBreach system
+### 1. Include the Appropriate Header
+- **C++ Projects:**  
+  Include `ActiveBreach.hpp` and link with `ActiveBreach.cpp`:
+  ```cpp
+  #include <ActiveBreach.hpp>
+  ```
+- **C/C++ Universal Projects:**  
+  Include `ActiveBreach.h` and link with `ActiveBreach.c`:
+  ```c
+  #include "ActiveBreach.h"
+  ```
 
-### **3. Making a System Call**
-Use the `ab_call` macro to dynamically invoke syscalls. The caller must provide:
+### 2. Initialize ActiveBreach
+Call the initialization function **before** any syscalls:
+- **C++ Example (optional "LMK" prints a status message):**
+  ```cpp
+  ActiveBreach_launch("LMK");
+  ```
+- **C/C++ Example:**
+  ```c
+  ActiveBreach_launch();
+  ```
+This function maps `ntdll.dll`, extracts syscall numbers, builds syscall stubs, and sets up the system.
+
+### 3. Making a System Call
+Use the `ab_call` macro to invoke syscalls dynamically. You must supply:
 - The NT function type
 - The syscall name
 - The required arguments
 
-#### **Example: NtQuerySystemInformation**
+**Example for NtQuerySystemInformation:**
 ```cpp
 NTSTATUS status;
 status = ab_call(NtQuerySystemInformation_t, "NtQuerySystemInformation", infoClass, buffer, bufferSize, &returnLength);
 ```
-Ensure `ActiveBreach_launch()` is called before making syscalls.
+*(For C, the syntax is similar but might pass the status as an additional parameter.)*
 
-### **4. Cleanup**
-Cleanup is handled **automatically** at program exit. No manual resource deallocation is required.
+### 4. Cleanup
+No manual cleanup is needed—resources are automatically released at program exit.
 
 ---
-
-## **C & C++ Universal Usage (ActiveBreach.h & ActiveBreach.c)**
-
-### **1. Include the Header File**
-For universal C and C++ projects, include the `ActiveBreach.h` file:
-```c
-#include "ActiveBreach.h"
-```
-Ensure `ActiveBreach.h` and `ActiveBreach.c` are properly linked.
-
-### **2. Initialize ActiveBreach**
-Before making any syscalls, initialize the system using:
-```c
-ActiveBreach_launch();
-```
-This function:
-- Maps `ntdll.dll`
-- Extracts syscall numbers (SSNs)
-- Builds syscall stubs
-- Sets up the ActiveBreach system
-
-### **3. Making a System Call**
-Use the `ab_call` macro to dynamically invoke syscalls. The caller must provide:
-- The NT function type
-- The syscall name
-- The required arguments
-
-#### **Example: NtQuerySystemInformation**
-```c
-NTSTATUS status;
-ab_call(NtQuerySystemInformation_t, "NtQuerySystemInformation", status, infoClass, buffer, bufferSize, &returnLength);
-```
-Ensure `ActiveBreach_launch()` is called before making syscalls.
-
-### **4. Cleanup**
-Cleanup is handled **automatically** at program exit. You do not need to manually free resources.
 
 ## How does this work under the hood?
 
