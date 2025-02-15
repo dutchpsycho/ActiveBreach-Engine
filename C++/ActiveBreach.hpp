@@ -1,8 +1,31 @@
 /*
-ACTIVEBREACH System
-@developer DutchPsycho
-@inspo MDSEC
-*/
+ * ==================================================================================
+ *  Repository:   Syscall Proxy
+ *  Project:      ActiveBreach
+ *  File:         ActiveBreach.hpp
+ *  Author:       DutchPsycho
+ *  Organization: TITAN Softwork Solutions
+ *  Inspired by:  MDSEC Research
+ *
+ *  Description:
+ *      ActiveBreach is a syscall abstraction layer that dynamically proxies syscalls
+ *      by extracting system service numbers (SSNs) from ntdll.dll and constructing
+ *      syscall stubs for indirect execution.
+ *
+ *  License:      Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
+ *  Copyright:    (C) 2025 TITAN Softwork Solutions. All rights reserved.
+ *
+ *  Licensing Terms:
+ *  ----------------------------------------------------------------------------------
+ *   - You are free to use, modify, and share this software.
+ *   - Commercial use is strictly prohibited.
+ *   - Proper credit must be given to TITAN Softwork Solutions.
+ *   - Modifications must be clearly documented.
+ *   - This software is provided "as-is" without warranties of any kind.
+ *
+ *  Full License: https://creativecommons.org/licenses/by-nc/4.0/
+ * ==================================================================================
+ */
 
 #ifndef ACTIVEBREACH_HPP
 #define ACTIVEBREACH_HPP
@@ -28,8 +51,8 @@ typedef LONG NTSTATUS;
 
 /*
  * ActiveBreach_launch:
- * launches the global ActiveBreach handler
- * Internally, it maps ntdll.dll & extracts ssns,builds syscall stubs, and sets up the activebreach system
+ * Launches the global ActiveBreach handler
+ * Internally, it maps ntdll.dll & extracts ssns,builds syscall stubs, and sets up the ActiveBreach system
 */
 
     void ActiveBreach_launch(const char* notify = nullptr);

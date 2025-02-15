@@ -1,3 +1,32 @@
+/*
+ * ==================================================================================
+ *  Repository:   Syscall Proxy
+ *  Project:      ActiveBreach
+ *  File:         ActiveBreach.cpp
+ *  Author:       DutchPsycho
+ *  Organization: TITAN Softwork Solutions
+ *  Inspired by:  MDSEC Research
+ *
+ *  Description:
+ *      ActiveBreach is a syscall abstraction layer that dynamically proxies syscalls
+ *      by extracting system service numbers (SSNs) from ntdll.dll and constructing
+ *      syscall stubs for indirect execution.
+ *
+ *  License:      Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
+ *  Copyright:    (C) 2025 TITAN Softwork Solutions. All rights reserved.
+ *
+ *  Licensing Terms:
+ *  ----------------------------------------------------------------------------------
+ *   - You are free to use, modify, and share this software.
+ *   - Commercial use is strictly prohibited.
+ *   - Proper credit must be given to TITAN Softwork Solutions.
+ *   - Modifications must be clearly documented.
+ *   - This software is provided "as-is" without warranties of any kind.
+ *
+ *  Full License: https://creativecommons.org/licenses/by-nc/4.0/
+ * ==================================================================================
+ */
+
 #include "ActiveBreach.hpp"
 
 #include <stdexcept>
@@ -5,172 +34,306 @@
 #include <string>
 #include <iostream>
 #include <cstring>
+#include <cstdarg>
+#include <windows.h>
 
 namespace {
 
-    class ActiveBreachInternal {
-    public:
-        ActiveBreachInternal() : stub_mem(nullptr), stub_mem_size(0) {}
-        ~ActiveBreachInternal() {
-            if (stub_mem) {
-                VirtualFree(stub_mem, 0, MEM_RELEASE);
+    [[noreturn]] void _fatal_err(const char* msg) {
+        std::cerr << msg << std::endl;
+        exit(1);
+    }
+
+    void _Zero(void* buffer, size_t size) {
+        SecureZeroMemory(buffer, size);
+        VirtualFree(buffer, 0, MEM_RELEASE);
+    }
+
+    void* _Buffer(size_t* out_size) {
+        wchar_t system_dir[MAX_PATH];
+        if (!GetSystemDirectoryW(system_dir, MAX_PATH))
+            _fatal_err("Failed to retrieve the system directory");
+
+        wchar_t ntdll_path[MAX_PATH];
+        if (swprintf(ntdll_path, MAX_PATH, L"%s\\ntdll.dll", system_dir) < 0)
+            _fatal_err("Failed to build ntdll.dll path");
+
+        HANDLE file = CreateFileW(ntdll_path, GENERIC_READ, FILE_SHARE_READ,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE)
+            _fatal_err("Failed to open ntdll.dll");
+
+        DWORD file_size = GetFileSize(file, nullptr);
+        if (file_size == INVALID_FILE_SIZE)
+            _fatal_err("Failed to get ntdll.dll size");
+
+        void* buffer = VirtualAlloc(nullptr, file_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!buffer)
+            _fatal_err("Failed to allocate memory for ntdll.dll");
+
+        DWORD bytes_read;
+        if (!ReadFile(file, buffer, file_size, &bytes_read, nullptr) || bytes_read != file_size)
+            _fatal_err("Failed to read ntdll.dll");
+
+        CloseHandle(file);
+
+        *out_size = file_size;
+        return buffer;
+    }
+
+    std::unordered_map<std::string, uint32_t> _ExtractSSN(void* mapped_base) {
+        std::unordered_map<std::string, uint32_t> syscall_table;
+
+        auto* dos_header = reinterpret_cast<IMAGE_DOS_HEADER*>(mapped_base);
+        if (dos_header->e_magic != IMAGE_DOS_SIGNATURE)
+            throw std::runtime_error("Invalid DOS header signature");
+
+        auto* nt_headers = reinterpret_cast<IMAGE_NT_HEADERS*>(reinterpret_cast<uint8_t*>(mapped_base) + dos_header->e_lfanew);
+        if (nt_headers->Signature != IMAGE_NT_SIGNATURE)
+            throw std::runtime_error("Invalid NT header signature");
+
+        IMAGE_DATA_DIRECTORY export_data = nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        if (export_data.VirtualAddress == 0)
+            throw std::runtime_error("No export directory found");
+
+        auto* export_dir = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(reinterpret_cast<uint8_t*>(mapped_base) + export_data.VirtualAddress);
+        auto* names = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(mapped_base) + export_dir->AddressOfNames);
+        auto* functions = reinterpret_cast<uint32_t*>(reinterpret_cast<uint8_t*>(mapped_base) + export_dir->AddressOfFunctions);
+        auto* ordinals = reinterpret_cast<uint16_t*>(reinterpret_cast<uint8_t*>(mapped_base) + export_dir->AddressOfNameOrdinals);
+
+        for (uint32_t i = 0; i < export_dir->NumberOfNames; ++i) {
+            std::string func_name(reinterpret_cast<char*>(
+                reinterpret_cast<uint8_t*>(mapped_base) + names[i]));
+
+            if (func_name.rfind("Nt", 0) == 0) {
+                uint32_t ssn = *reinterpret_cast<uint32_t*>(
+                    reinterpret_cast<uint8_t*>(mapped_base) + functions[ordinals[i]] + 4);
+                syscall_table[func_name] = ssn;
             }
         }
 
-        void BuildStubs(const std::unordered_map<std::string, uint32_t>& syscall_table) {
-            stub_mem_size = syscall_table.size() * 16; // each stub is 16 bytes
-            stub_mem = static_cast<uint8_t*>(VirtualAlloc(nullptr, stub_mem_size,
-                MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
-            if (!stub_mem) {
-                throw std::runtime_error("Failed to allocate executable memory");
+        return syscall_table;
+    }
+
+
+    //------------------------------------------------------------------------------
+    // Internal class to build & manage stubs (_ActiveBreach_Internal)
+    //------------------------------------------------------------------------------
+
+    class _ActiveBreach_Internal {
+    public:
+        _ActiveBreach_Internal() : _stub_mem(nullptr), _stub_mem_size(0) {}
+
+        ~_ActiveBreach_Internal() {
+            if (_stub_mem) {
+                VirtualFree(_stub_mem, 0, MEM_RELEASE);
             }
-            uint8_t* current_stub = stub_mem;
+        }
+
+        void _BuildStubs(const std::unordered_map<std::string, uint32_t>& syscall_table) {
+            _stub_mem_size = syscall_table.size() * 16; // Each stub is 16 bytes
+            _stub_mem = static_cast<uint8_t*>(VirtualAlloc(nullptr, _stub_mem_size,
+                MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+
+            if (!_stub_mem)
+                throw std::runtime_error("Failed to allocate executable memory for stubs");
+
+            uint8_t* current_stub = _stub_mem;
             for (const auto& [name, ssn] : syscall_table) {
-                CreateStub(current_stub, ssn);
-                syscall_stubs[name] = current_stub;
+                _CreateStub(current_stub, ssn);
+                _syscall_stubs[name] = current_stub;
                 current_stub += 16;
             }
         }
 
-        void* GetStub(const std::string& name) const {
-            auto it = syscall_stubs.find(name);
-            return (it != syscall_stubs.end()) ? it->second : nullptr;
+        void* _GetStub(const std::string& name) const {
+            auto it = _syscall_stubs.find(name);
+            return (it != _syscall_stubs.end()) ? it->second : nullptr;
         }
 
+    /* TODO:
+    * - Switch to a on-demand based creation model (no static stubs)
+    * - Call syscall prologues in ntdll.dll with our args
+    *   Some enterprise EDR would check the callstack, syscall not originating from ntdll.dll would be flagged
+     */  
     private:
-        void CreateStub(void* target_address, uint32_t ssn) {
-            constexpr uint8_t stub_template[] = {
-                0x4C, 0x8B, 0xD1,              // mov r10, rcx
-                0xB8, 0x00, 0x00, 0x00, 0x00,  // mov eax, ssn
-                0x0F, 0x05,                    // syscall
-                0xC3                           // ret
-            };
-            uint8_t stub[sizeof(stub_template)];
-            memcpy(stub, stub_template, sizeof(stub_template));
+        void _CreateStub(void* target_address, uint32_t ssn) {
+            // Stub layout (16 bytes):
+            // 0x4C, 0x8B, 0xD1, 0xB8, [4-byte ssn], 0x0F, 0x05, 0xC3, zero-pad.
+            uint8_t stub[16] = { 0 };
+            stub[0] = 0x4C;
+            stub[1] = 0x8B;
+            stub[2] = 0xD1;
+            stub[3] = 0xB8;
             *reinterpret_cast<uint32_t*>(stub + 4) = ssn;
+            stub[8] = 0x0F;
+            stub[9] = 0x05;
+            stub[10] = 0xC3;
             memcpy(target_address, stub, sizeof(stub));
         }
 
-        uint8_t* stub_mem;
-        size_t stub_mem_size;
-        std::unordered_map<std::string, void*> syscall_stubs;
+        uint8_t* _stub_mem;
+        size_t _stub_mem_size;
+        std::unordered_map<std::string, void*> _syscall_stubs;
     };
 
-    class ab_Internal {
-    public:
-        static void* Map() {
-            wchar_t system_dir[MAX_PATH];
-            if (!GetSystemDirectoryW(system_dir, MAX_PATH)) {
-                throw std::runtime_error("Failed to retrieve the system directory");
-            }
-            std::wstring ntdll_path = std::wstring(system_dir) + L"\\ntdll.dll";
-            HANDLE file = CreateFileW(ntdll_path.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (file == INVALID_HANDLE_VALUE) {
-                throw std::runtime_error("Failed to open ntdll.dll");
-            }
-            HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
-            if (!mapping) {
-                CloseHandle(file);
-                throw std::runtime_error("Failed to create file mapping");
-            }
-            void* mapped_base = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
-            CloseHandle(mapping);
-            CloseHandle(file);
-            if (!mapped_base) {
-                throw std::runtime_error("Failed to map ntdll.dll into memory");
-            }
+    _ActiveBreach_Internal _g_ab_internal;
 
-            ZeroOutSections(mapped_base);
 
-            return mapped_base;
-        }
+    //------------------------------------------------------------------------------
+    // Dispatcher Globals and Structures
+    //------------------------------------------------------------------------------
 
-        static void ZeroOutSections(void* mapped_base) {
-            auto* dos_header = reinterpret_cast<IMAGE_DOS_HEADER*>(mapped_base);
-            if (dos_header->e_magic != IMAGE_DOS_SIGNATURE) {
-                throw std::runtime_error("invalid DOS header signature");
-            }
-            auto* nt_headers = reinterpret_cast<IMAGE_NT_HEADERS*>(
-                reinterpret_cast<uint8_t*>(mapped_base) + dos_header->e_lfanew);
-            if (nt_headers->Signature != IMAGE_NT_SIGNATURE) {
-                throw std::runtime_error("invalid NT header signature");
-            }
+    // All stubs are assumed to have signature:
+    // ULONG_PTR NTAPI Fn(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
+    //                     ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
+    typedef ULONG_PTR(NTAPI* _ABStubFn)(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
+        ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
 
-            auto* section = IMAGE_FIRST_SECTION(nt_headers);
-            for (int i = 0; i < nt_headers->FileHeader.NumberOfSections; ++i, ++section) {
-                std::string section_name(reinterpret_cast<char*>(section->Name), 8);
-
-                if (section_name != ".text" && section_name != ".rdata") {
-                    void* section_addr = reinterpret_cast<void*>(
-                        reinterpret_cast<uint8_t*>(mapped_base) + section->VirtualAddress);
-
-                    DWORD old_protection;
-                    if (VirtualProtect(section_addr, section->Misc.VirtualSize, PAGE_READWRITE, &old_protection)) {
-                        std::memset(section_addr, 0, section->Misc.VirtualSize);
-
-                        VirtualProtect(section_addr, section->Misc.VirtualSize, old_protection, &old_protection);
-                    }
-                }
-            }
-        }
-
-        static std::unordered_map<std::string, uint32_t> ExtractSSN(void* mapped_base) {
-            std::unordered_map<std::string, uint32_t> syscall_table;
-            auto* dos_header = reinterpret_cast<IMAGE_DOS_HEADER*>(mapped_base);
-            if (dos_header->e_magic != IMAGE_DOS_SIGNATURE) {
-                throw std::runtime_error("Invalid DOS header signature");
-            }
-            auto* nt_headers = reinterpret_cast<IMAGE_NT_HEADERS*>(
-                reinterpret_cast<uint8_t*>(mapped_base) + dos_header->e_lfanew);
-            if (nt_headers->Signature != IMAGE_NT_SIGNATURE) {
-                throw std::runtime_error("Invalid NT header signature");
-            }
-
-            auto* export_dir = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(
-                reinterpret_cast<uint8_t*>(mapped_base) +
-                nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress);
-            auto* names = reinterpret_cast<uint32_t*>(
-                reinterpret_cast<uint8_t*>(mapped_base) + export_dir->AddressOfNames);
-            auto* functions = reinterpret_cast<uint32_t*>(
-                reinterpret_cast<uint8_t*>(mapped_base) + export_dir->AddressOfFunctions);
-            auto* ordinals = reinterpret_cast<uint16_t*>(
-                reinterpret_cast<uint8_t*>(mapped_base) + export_dir->AddressOfNameOrdinals);
-
-            for (uint32_t i = 0; i < export_dir->NumberOfNames; ++i) {
-                std::string func_name(reinterpret_cast<char*>(
-                    reinterpret_cast<uint8_t*>(mapped_base) + names[i]));
-
-                if (func_name.rfind("Nt", 0) == 0) {
-                    uint32_t ssn = *reinterpret_cast<uint32_t*>(
-                        reinterpret_cast<uint8_t*>(mapped_base) + functions[ordinals[i]] + 4);
-                    syscall_table[func_name] = ssn;
-                }
-            }
-            return syscall_table;
-        }
-
-        static void Cleanup(void* mapped_base) {
-            if (mapped_base) {
-                UnmapViewOfFile(mapped_base);
-            }
-        }
+    struct _ABCallRequest {
+        void* stub;          // Function pointer to call
+        size_t arg_count;    // Number of arguments (0..8)
+        ULONG_PTR args[8];   // Arguments (unused slots are 0)
+        ULONG_PTR ret;       // Return value (set by the dispatcher)
+        HANDLE complete;     // Event to signal completion
     };
 
-    ActiveBreachInternal g_ab_internal;
+    // Global dispatcher variables
+    HANDLE _g_abCallEvent = nullptr;          // Signaled when a new request is posted
+    CRITICAL_SECTION _g_abCallCS;             // Protects _g_abCallRequest
+    _ABCallRequest _g_abCallRequest = {};     // Shared request (one at a time)
+    HANDLE _g_abInitializedEvent = nullptr;   // Signaled when dispatcher thread is ready
 
+#define DISPATCH_CALL(n, ...) case n: ret = fn(__VA_ARGS__); break;
+
+//------------------------------------------------------------------------------
+// Dispatcher Thread Function
+//------------------------------------------------------------------------------
+
+    DWORD WINAPI _ActiveBreach_Dispatcher(LPVOID /*lpParameter*/) {
+        if (!_g_abCallEvent)
+            _fatal_err("Dispatcher event not created");
+        for (;;) {
+            WaitForSingleObject(_g_abCallEvent, INFINITE);
+
+            EnterCriticalSection(&_g_abCallCS);
+            _ABCallRequest req = _g_abCallRequest;
+            LeaveCriticalSection(&_g_abCallCS);
+
+            _ABStubFn fn = reinterpret_cast<_ABStubFn>(req.stub);
+            ULONG_PTR ret = 0;
+            switch (req.arg_count) {
+                DISPATCH_CALL(0, 0, 0, 0, 0, 0, 0, 0, 0)
+                    DISPATCH_CALL(1, req.args[0], 0, 0, 0, 0, 0, 0, 0)
+                    DISPATCH_CALL(2, req.args[0], req.args[1], 0, 0, 0, 0, 0, 0)
+                    DISPATCH_CALL(3, req.args[0], req.args[1], req.args[2], 0, 0, 0, 0, 0)
+                    DISPATCH_CALL(4, req.args[0], req.args[1], req.args[2], req.args[3], 0, 0, 0, 0)
+                    DISPATCH_CALL(5, req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], 0, 0, 0)
+                    DISPATCH_CALL(6, req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], 0, 0)
+                    DISPATCH_CALL(7, req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], 0)
+                    DISPATCH_CALL(8, req.args[0], req.args[1], req.args[2], req.args[3],
+                        req.args[4], req.args[5], req.args[6], req.args[7])
+            default:
+                _fatal_err("Invalid argument count in call dispatcher");
+            }
+
+            EnterCriticalSection(&_g_abCallCS);
+            _g_abCallRequest.ret = ret;
+            LeaveCriticalSection(&_g_abCallCS);
+
+            SetEvent(req.complete);
+        }
+
+        return 0; // Never reached
+    }
+
+    //------------------------------------------------------------------------------
+    // Dispatcher Thread Initialization
+    //------------------------------------------------------------------------------
+
+    DWORD WINAPI _ActiveBreach_ThreadProc(LPVOID /*lpParameter*/) {
+        InitializeCriticalSection(&_g_abCallCS);
+        _g_abCallEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (!_g_abCallEvent)
+            _fatal_err("Failed to create dispatcher event");
+        if (_g_abInitializedEvent)
+            SetEvent(_g_abInitializedEvent);
+        _ActiveBreach_Dispatcher(nullptr);
+        return 0;
+    }
+
+    //------------------------------------------------------------------------------
+    // _ActiveBreach_Call Implementation
+    //------------------------------------------------------------------------------
+
+    extern "C" ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...) {
+        if (!stub)
+            _fatal_err("_ActiveBreach_Call: stub is NULL");
+        if (arg_count > 8)
+            _fatal_err("_ActiveBreach_Call: Too many arguments (max 8)");
+
+        _ABCallRequest req = {};
+        req.stub = stub;
+        req.arg_count = arg_count;
+
+        va_list vl;
+        va_start(vl, arg_count);
+        for (size_t i = 0; i < arg_count; ++i)
+            req.args[i] = va_arg(vl, ULONG_PTR);
+        va_end(vl);
+
+        req.complete = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+        if (!req.complete)
+            _fatal_err("Failed to create completion event");
+
+        EnterCriticalSection(&_g_abCallCS);
+        _g_abCallRequest = req;
+        LeaveCriticalSection(&_g_abCallCS);
+
+        SetEvent(_g_abCallEvent);
+        WaitForSingleObject(req.complete, INFINITE);
+
+        EnterCriticalSection(&_g_abCallCS);
+        ULONG_PTR ret = _g_abCallRequest.ret;
+        LeaveCriticalSection(&_g_abCallCS);
+
+        CloseHandle(req.complete);
+
+        return ret;
+    }
 }
+
+
+//------------------------------------------------------------------------------
+// Exports
+//------------------------------------------------------------------------------
 
 extern "C" void ActiveBreach_launch(const char* notify) {
     try {
-        void* mapped_base = ab_Internal::Map();
-        auto syscall_table = ab_Internal::ExtractSSN(mapped_base);
-        ab_Internal::Cleanup(mapped_base);
-        g_ab_internal.BuildStubs(syscall_table);
+        size_t ntdll_size = 0;
 
-        if (notify && std::strcmp(notify, "LMK") == 0) {
+        void* mapped_base = _Buffer(&ntdll_size);
+        auto syscall_table = _ExtractSSN(mapped_base);
+
+        _Zero(mapped_base, ntdll_size);
+
+        _g_ab_internal._BuildStubs(syscall_table);
+
+        _g_abInitializedEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+        if (!_g_abInitializedEvent)
+            throw std::runtime_error("Failed to create initialization event");
+
+        HANDLE hThread = CreateThread(nullptr, 0, _ActiveBreach_ThreadProc, nullptr, 0, nullptr);
+        if (!hThread)
+            throw std::runtime_error("Failed to create ActiveBreach dispatcher thread");
+
+        WaitForSingleObject(_g_abInitializedEvent, INFINITE);
+        CloseHandle(_g_abInitializedEvent);
+        _g_abInitializedEvent = nullptr;
+        CloseHandle(hThread);
+
+        if (notify && std::strcmp(notify, "LMK") == 0)
             std::cout << "[AB] ACTIVEBREACH OPERATIONAL" << std::endl;
-        }
     }
     catch (const std::exception& e) {
         std::cerr << "ActiveBreach_launch err: " << e.what() << std::endl;
@@ -179,6 +342,7 @@ extern "C" void ActiveBreach_launch(const char* notify) {
 }
 
 extern "C" void* _ab_get_stub(const char* name) {
-    if (!name) return nullptr;
-    return g_ab_internal.GetStub(name);
+    if (!name)
+        return nullptr;
+    return _g_ab_internal._GetStub(name);
 }
