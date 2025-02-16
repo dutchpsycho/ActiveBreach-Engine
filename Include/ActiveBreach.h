@@ -53,55 +53,74 @@ extern "C" {
 #define NTAPI __stdcall
 #endif
 
+#ifndef ACTIVEBREACH_ERROR_CODES
+#define ACTIVEBREACH_ERROR_CODES
+#define ACTIVEBREACH_SYSCALL_RETURNMODIFIED   0xE0001001
+#define ACTIVEBREACH_SYSCALL_STACKPTRMODIFIED 0xE0001002
+#define ACTIVEBREACH_SYSCALL_LONGSYSCALL      0xE0001003 
+#endif
+
 #define STATUS_SUCCESS              ((NTSTATUS)0x00000000L)
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
 
-    typedef struct SyscallEntry {
-        char* name;
-        uint32_t ssn;
-    } SyscallEntry;
+#define SYSCALL_TIME_THRESHOLD 50000000ULL
 
-    typedef struct SyscallTable {
-        SyscallEntry* entries;
-        size_t count;
-    } SyscallTable;
 
-    void* _Buffer(size_t* out_size);
-    SyscallTable _GetSyscallTable(void* mapped_base);
-    void _Cleanup(void* mapped_base);
+typedef struct SyscallEntry {
+    char* name;
+    uint32_t ssn;
+} SyscallEntry;
 
-    typedef struct {
-        char* name;
-        void* stub;
-    } StubEntry;
+typedef struct SyscallTable {
+    SyscallEntry* entries;
+    size_t count;
+} SyscallTable;
 
-    typedef struct ActiveBreach {
-        uint8_t* stub_mem;
-        size_t stub_mem_size;
-        StubEntry* stubs;
-        size_t stub_count;
-    } ActiveBreach;
+typedef struct _SyscallState {
+    uint64_t start_time;
+    void* stack_ptr;
+    void* ret_addr;
+} SyscallState;
 
-    void _ActiveBreach_Init(ActiveBreach* ab);
-    int _ActiveBreach_AllocStubs(ActiveBreach* ab, const SyscallTable* table);
-    void* _ActiveBreach_GetStub(ActiveBreach* ab, const char* name);
-    void _ActiveBreach_Free(ActiveBreach* ab);
+typedef struct {
+    char* name;
+    void* stub;
+} StubEntry;
 
-    /* Cleanup function; registers with atexit */
-    void _ActiveBreach_Cleanup(void);
+typedef struct ActiveBreach {
+    uint8_t* stub_mem;
+    size_t stub_mem_size;
+    StubEntry* stubs;
+    size_t stub_count;
+} ActiveBreach;
 
-    /* Launch function spawns ab thread that performs initialization and handles ab_calls */
-    void ActiveBreach_launch(void);
+/* Function declarations */
+void* _Buffer(size_t* out_size);
+SyscallTable _GetSyscallTable(void* mapped_base);
+void _Cleanup(void* mapped_base);
 
-    /* --- Global ActiveBreach instance --- */
-    extern ActiveBreach g_ab;
+void _ActiveBreach_Init(ActiveBreach* ab);
+int _ActiveBreach_AllocStubs(ActiveBreach* ab, const SyscallTable* table);
+void* _ActiveBreach_GetStub(ActiveBreach* ab, const char* name);
+void _ActiveBreach_Free(ActiveBreach* ab);
+void _ActiveBreach_Cleanup(void);
+void ActiveBreach_launch(void);
 
-    /* --- Call Dispatcher --- */
-    /*
-       _ActiveBreach_Call dispatches a call to the worker thread
-       Supports 0..8 ULONG_PTR args
-    */
-    ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...);
+/* Cleanup function; registers with atexit */
+void _ActiveBreach_Cleanup(void);
+
+/* Launch function spawns ab thread that performs initialization and handles ab_calls */
+void ActiveBreach_launch(void);
+
+/* --- Global ActiveBreach instance --- */
+extern ActiveBreach g_ab;
+
+/* --- Call Dispatcher --- */
+/*
+    _ActiveBreach_Call dispatches a call to the worker thread
+    Supports 0..8 ULONG_PTR args
+*/
+ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...);
 
 #ifdef __cplusplus
 }
@@ -112,7 +131,7 @@ extern "C" {
 #define PP_NARG_(...) PP_ARG_N(__VA_ARGS__)
 #define PP_ARG_N(_1,_2,_3,_4,_5,_6,_7,_8, N, ...) N
 #define PP_RSEQ_N() 8,7,6,5,4,3,2,1,0
-
+    
 #ifdef __cplusplus
 #include <type_traits>
 template <typename Fn, typename... Args>

@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <intrin.h>
 
 #ifdef _MSC_VER
 #define NORETURN __declspec(noreturn)
@@ -52,6 +53,19 @@ static NORETURN void fatal_err(const char* msg) {
 void _Zero(void* buffer, size_t size) {
     SecureZeroMemory(buffer, size);
     VirtualFree(buffer, 0, MEM_RELEASE);
+}
+
+void* aballoc(size_t size) {
+    void* ptr = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
+    if (!ptr) {
+        fprintf(stderr, "aballoc failed (size: %zu, error: %lu)\n", size, GetLastError());
+        ExitProcess(1);
+    }
+    return ptr;
+}
+
+void abfree(void* ptr) {
+    if (ptr) HeapFree(GetProcessHeap(), 0, ptr);
 }
 
 void* _Buffer(size_t* out_size) {
@@ -185,20 +199,19 @@ void _ActiveBreach_Init(ActiveBreach* ab) {
  * - Call syscall prologues in ntdll.dll with our args
  * Some enterprise EDR would check the callstack, syscall not originating from ntdll.dll would be flagged
  */
-static void CreateStub(void* target_address, uint32_t ssn) {
+void CreateStub(void* target_address, uint32_t ssn) {
     /* Stub layout:
        0x4C, 0x8B, 0xD1, 0xB8, [4-byte ssn], 0x0F, 0x05, 0xC3, zero-pad to 16 bytes.
     */
-    uint8_t stub[16] = { 0 };
-    stub[0] = 0x4C;
+    uint8_t* stub = (uint8_t*)target_address;
+    stub[0] = 0x4C; // mov r10, rcx
     stub[1] = 0x8B;
     stub[2] = 0xD1;
-    stub[3] = 0xB8;
+    stub[3] = 0xB8; // mov eax, ssn
     *(uint32_t*)(stub + 4) = ssn;
-    stub[8] = 0x0F;
+    stub[8] = 0x0F; // syscall
     stub[9] = 0x05;
-    stub[10] = 0xC3;
-    memcpy(target_address, stub, sizeof(stub));
+    stub[10] = 0xC3; // ret
 }
 
 // Allocate executable memory for stubs and populate them based on the syscall table
@@ -342,14 +355,29 @@ static DWORD WINAPI _ActiveBreach_Dispatcher(LPVOID lpParameter) {
     return 0;
 }
 
+void _ActiveBreach_Callback(const SyscallState* state) {
+    uint64_t end_time = __rdtsc();
+    uint64_t elapsed = end_time - state->start_time;
+
+    void* current_stack_ptr = _AddressOfReturnAddress();
+    void* current_ret_addr = _ReturnAddress();
+
+    if (current_stack_ptr != state->stack_ptr) { RaiseException(ACTIVEBREACH_SYSCALL_STACKPTRMODIFIED, 0, 0, NULL); }
+    if (current_ret_addr != state->ret_addr) { RaiseException(ACTIVEBREACH_SYSCALL_RETURNMODIFIED, 0, 0, NULL); }
+    if (elapsed > SYSCALL_TIME_THRESHOLD) { RaiseException(ACTIVEBREACH_SYSCALL_LONGSYSCALL, 0, 0, NULL); }
+}
 
 ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...) {
-
     if (!stub)
         fatal_err("_ActiveBreach_Call: stub is NULL");
 
     if (arg_count > 8)
         fatal_err("_ActiveBreach_Call: Too many arguments (max 8)");
+
+    SyscallState execState;
+    execState.start_time = __rdtsc();
+    execState.stack_ptr = _AddressOfReturnAddress();
+    execState.ret_addr = _ReturnAddress();
 
     ABCallRequest req = { 0 };
 
@@ -357,11 +385,9 @@ ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...) {
     req.arg_count = arg_count;
     va_list vl;
     va_start(vl, arg_count);
-
     for (size_t i = 0; i < arg_count; i++) {
         req.args[i] = va_arg(vl, ULONG_PTR);
     }
-
     va_end(vl);
 
     req.complete = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -373,14 +399,15 @@ ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...) {
     LeaveCriticalSection(&g_abCallCS);
 
     SetEvent(g_abCallEvent);
-
     WaitForSingleObject(req.complete, INFINITE);
 
     EnterCriticalSection(&g_abCallCS);
     ULONG_PTR ret = g_abCallRequest.ret;
     LeaveCriticalSection(&g_abCallCS);
-
     CloseHandle(req.complete);
+
+    _ActiveBreach_Callback(&execState);
+
     return ret;
 }
 

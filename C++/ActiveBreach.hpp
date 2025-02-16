@@ -42,6 +42,18 @@ extern "C" {
 
 typedef LONG NTSTATUS;
 
+constexpr DWORD ACTIVEBREACH_SYSCALL_RETURNMODIFIED = 0xE0001001;
+constexpr DWORD ACTIVEBREACH_SYSCALL_STACKPTRMODIFIED = 0xE0001002;
+constexpr DWORD ACTIVEBREACH_SYSCALL_LONGSYSCALL = 0xE0001003;
+
+constexpr uint64_t SYSCALL_TIME_THRESHOLD = 50000000ULL;
+
+struct _SyscallState {
+    uint64_t start_time;
+    void* stack_ptr;
+    void* ret_addr;
+};
+
 #ifndef STATUS_SUCCESS
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
 #endif

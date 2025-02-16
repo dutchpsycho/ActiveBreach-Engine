@@ -29,13 +29,16 @@
 
 #include "ActiveBreach.hpp"
 
+#include <windows.h>
+#include <intrin.h>
+
 #include <stdexcept>
 #include <unordered_map>
 #include <string>
 #include <iostream>
 #include <cstring>
 #include <cstdarg>
-#include <windows.h>
+
 
 namespace {
 
@@ -263,7 +266,22 @@ namespace {
     }
 
     //------------------------------------------------------------------------------
-    // _ActiveBreach_Call Implementation
+    // Callback Implementation
+    //------------------------------------------------------------------------------
+    void ActiveBreach_Callback(const _SyscallState& state) {
+        uint64_t end_time = __rdtsc();
+        uint64_t elapsed = end_time - state.start_time;
+
+        void* current_stack_ptr = _AddressOfReturnAddress();
+        void* current_ret_addr = _ReturnAddress();
+
+        if (current_stack_ptr != state.stack_ptr) { RaiseException(ACTIVEBREACH_SYSCALL_STACKPTRMODIFIED, 0, 0, nullptr); }
+        if (current_ret_addr != state.ret_addr) { RaiseException(ACTIVEBREACH_SYSCALL_RETURNMODIFIED, 0, 0, nullptr); }
+        if (elapsed > SYSCALL_TIME_THRESHOLD) { RaiseException(ACTIVEBREACH_SYSCALL_LONGSYSCALL, 0, 0, nullptr); }
+    }
+
+    //------------------------------------------------------------------------------
+    // ActiveBreach call Implementation
     //------------------------------------------------------------------------------
 
     extern "C" ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...) {
@@ -271,6 +289,11 @@ namespace {
             _fatal_err("_ActiveBreach_Call: stub is NULL");
         if (arg_count > 8)
             _fatal_err("_ActiveBreach_Call: Too many arguments (max 8)");
+
+        _SyscallState execState;
+        execState.start_time = __rdtsc();
+        execState.stack_ptr = _AddressOfReturnAddress();
+        execState.ret_addr = _ReturnAddress();
 
         _ABCallRequest req = {};
         req.stub = stub;
@@ -296,8 +319,9 @@ namespace {
         EnterCriticalSection(&_g_abCallCS);
         ULONG_PTR ret = _g_abCallRequest.ret;
         LeaveCriticalSection(&_g_abCallCS);
-
         CloseHandle(req.complete);
+
+        ActiveBreach_Callback(execState);
 
         return ret;
     }
