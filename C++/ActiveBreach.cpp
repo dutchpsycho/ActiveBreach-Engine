@@ -52,31 +52,48 @@ namespace {
         VirtualFree(buffer, 0, MEM_RELEASE);
     }
 
+    #define XOR_KEY 0x5A
+
+    // ntdll.dll, if plaintext then EDR will pick up it
+    static const wchar_t enc[] = {
+        0x0036, 0x0036, 0x003E, 0x0074, 0x0036, 0x0036, 0x003E, 0x002E, 0x0034
+    };
+
+    void _decode(wchar_t* decoded, size_t size) {
+        for (size_t i = 0; i < size; i++) {
+            decoded[i] = enc[size - i - 1] ^ XOR_KEY;
+        }
+        decoded[size] = L'\0';
+    }
+
     void* _Buffer(size_t* out_size) {
         wchar_t system_dir[MAX_PATH];
         if (!GetSystemDirectoryW(system_dir, MAX_PATH))
             _fatal_err("Failed to retrieve the system directory");
 
-        wchar_t ntdll_path[MAX_PATH];
-        if (swprintf(ntdll_path, MAX_PATH, L"%s\\ntdll.dll", system_dir) < 0)
-            _fatal_err("Failed to build ntdll.dll path");
+        wchar_t decoded[10];
+        _decode(decoded, 9);
 
-        HANDLE file = CreateFileW(ntdll_path, GENERIC_READ, FILE_SHARE_READ,
+        wchar_t path[MAX_PATH];
+        if (swprintf(path, MAX_PATH, L"%s\\%s", system_dir, decoded) < 0)
+            _fatal_err("Failed to build path");
+
+        HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ,
             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file == INVALID_HANDLE_VALUE)
-            _fatal_err("Failed to open ntdll.dll");
+            _fatal_err("Failed to open file");
 
         DWORD file_size = GetFileSize(file, nullptr);
         if (file_size == INVALID_FILE_SIZE)
-            _fatal_err("Failed to get ntdll.dll size");
+            _fatal_err("Failed to get file size");
 
         void* buffer = VirtualAlloc(nullptr, file_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (!buffer)
-            _fatal_err("Failed to allocate memory for ntdll.dll");
+            _fatal_err("Failed to allocate memory for file");
 
         DWORD bytes_read;
         if (!ReadFile(file, buffer, file_size, &bytes_read, nullptr) || bytes_read != file_size)
-            _fatal_err("Failed to read ntdll.dll");
+            _fatal_err("Failed to read file");
 
         CloseHandle(file);
 
@@ -334,12 +351,12 @@ namespace {
 
 extern "C" void ActiveBreach_launch(const char* notify) {
     try {
-        size_t ntdll_size = 0;
+        size_t ab_handle_size = 0;
 
-        void* mapped_base = _Buffer(&ntdll_size);
+        void* mapped_base = _Buffer(&ab_handle_size);
         auto syscall_table = _ExtractSSN(mapped_base);
 
-        _Zero(mapped_base, ntdll_size);
+        _Zero(mapped_base, ab_handle_size);
 
         _g_ab_internal._BuildStubs(syscall_table);
 
