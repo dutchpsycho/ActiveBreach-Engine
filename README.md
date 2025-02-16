@@ -1,4 +1,3 @@
-![TITAN SOFTWORKS](https://cdn.discordapp.com/icons/1240608336005828668/c1bf74f2566a9ab188447ef8ce679b4d.webp?size=2048&format=webp)
 ![MDSEC](https://www.mdsec.co.uk/wp-content/themes/mdsec/img/mdsec-logo.svg)
 
 ## Project Overview  
