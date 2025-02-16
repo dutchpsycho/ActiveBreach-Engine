@@ -7,9 +7,10 @@
 It implements a **stub-based syscall proxying system**, allowing **direct invocation of system calls** while bypassing traditional user-mode hooks, anti-cheat, and antivirus monitoring.  
 
 This project is powered by **ActiveBreach**, a dedicated syscall execution framework that:  
-- Dynamically extracts **system service numbers (SSNs)** from `ntdll.dll`  
+- Dynamically extracts **system service numbers (SSNs)** from `ntdll.dll`
 - Constructs **syscall stubs** for direct execution  
-- Uses a **dispatcher model** to invoke syscalls without routing through user-mode APIs  
+- Uses a **dispatcher model** to invoke syscalls without routing through user-mode APIs
+- Leverages a **callback** to make sure the syscall was not intercepted.
 
 For a deeper technical breakdown, see > [TECH.md](TECH.md).  
 
