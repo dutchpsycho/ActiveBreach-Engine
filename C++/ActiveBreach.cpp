@@ -151,19 +151,32 @@ namespace {
         }
 
         void _BuildStubs(const std::unordered_map<std::string, uint32_t>& syscall_table) {
-            _stub_mem_size = syscall_table.size() * 16; // Each stub is 16 bytes
+            _stub_mem_size = syscall_table.size() * 16;
             _stub_mem = static_cast<uint8_t*>(VirtualAlloc(nullptr, _stub_mem_size,
                 MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
 
-            if (!_stub_mem)
+            if (!_stub_mem) {
                 throw std::runtime_error("Failed to allocate executable memory for stubs");
+            }
 
             uint8_t* current_stub = _stub_mem;
+
+#if __cplusplus >= 202002L
             for (const auto& [name, ssn] : syscall_table) {
                 _CreateStub(current_stub, ssn);
                 _syscall_stubs[name] = current_stub;
                 current_stub += 16;
             }
+#else
+            for (const auto& entry : syscall_table) {
+                const std::string& name = entry.first;
+                uint32_t ssn = entry.second;
+
+                _CreateStub(current_stub, ssn);
+                _syscall_stubs[name] = current_stub;
+                current_stub += 16;
+            }
+#endif
         }
 
         void* _GetStub(const std::string& name) const {
