@@ -151,32 +151,19 @@ namespace {
         }
 
         void _BuildStubs(const std::unordered_map<std::string, uint32_t>& syscall_table) {
-            _stub_mem_size = syscall_table.size() * 16;
+            _stub_mem_size = syscall_table.size() * 16; // Each stub is 16 bytes
             _stub_mem = static_cast<uint8_t*>(VirtualAlloc(nullptr, _stub_mem_size,
                 MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
 
-            if (!_stub_mem) {
+            if (!_stub_mem)
                 throw std::runtime_error("Failed to allocate executable memory for stubs");
-            }
 
             uint8_t* current_stub = _stub_mem;
-
-#if __cplusplus >= 202002L
             for (const auto& [name, ssn] : syscall_table) {
                 _CreateStub(current_stub, ssn);
                 _syscall_stubs[name] = current_stub;
                 current_stub += 16;
             }
-#else
-            for (const auto& entry : syscall_table) {
-                const std::string& name = entry.first;
-                uint32_t ssn = entry.second;
-
-                _CreateStub(current_stub, ssn);
-                _syscall_stubs[name] = current_stub;
-                current_stub += 16;
-            }
-#endif
         }
 
         void* _GetStub(const std::string& name) const {
@@ -362,7 +349,9 @@ namespace {
 // Exports
 //------------------------------------------------------------------------------
 
-extern "C" void ActiveBreach_launch(const char* notify) {
+extern "C" void ActiveBreach_launch() {
+    ActiveBreach_Initialized = true;
+
     try {
         size_t ab_handle_size = 0;
 
@@ -385,9 +374,6 @@ extern "C" void ActiveBreach_launch(const char* notify) {
         CloseHandle(_g_abInitializedEvent);
         _g_abInitializedEvent = nullptr;
         CloseHandle(hThread);
-
-        if (notify && std::strcmp(notify, "LMK") == 0)
-            std::cout << "[AB] ACTIVEBREACH OPERATIONAL" << std::endl;
     }
     catch (const std::exception& e) {
         std::cerr << "ActiveBreach_launch err: " << e.what() << std::endl;
@@ -395,8 +381,21 @@ extern "C" void ActiveBreach_launch(const char* notify) {
     }
 }
 
+NTSTATUS NTAPI DefaultStub(...) {
+    return STATUS_UNSUCCESSFUL;
+}
+
+// program would crash if activebreach was NOT initalized bc of returning a nullptr
+// caused cfg hell, fixed by returning a safe ptr
 extern "C" void* _ab_get_stub(const char* name) {
     if (!name)
-        return nullptr;
-    return _g_ab_internal._GetStub(name);
+        return reinterpret_cast<void*>(&DefaultStub);
+
+    void* stub = _g_ab_internal._GetStub(name);
+    if (!stub) {
+        fprintf(stderr, "Stub \"%s\" not found\n", name);
+        return reinterpret_cast<void*>(&DefaultStub);
+    }
+
+    return stub;
 }
