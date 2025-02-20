@@ -1,3 +1,7 @@
+# internal
+ARMED/
+Dependancies/
+
 # Visual Studio
 .vs/
 *.user
@@ -29,6 +33,8 @@ ipch/
 
 # Build Directories
 Debug/
+target/
+/target/
 Release/
 x64/Debug/
 x64/Release/
@@ -47,6 +53,7 @@ out/
 *.map
 *.manifest
 *.tlog
+*.lock
 
 # C++ Files
 *.o
@@ -63,6 +70,7 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 Makefile
+ARMED
 
 # Code Analysis
 *.gcda

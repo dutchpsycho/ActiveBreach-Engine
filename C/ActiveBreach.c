@@ -42,6 +42,7 @@
 #define NORETURN __attribute__((noreturn))
 #endif
 
+volatile bool g_ab_initialized = false;
 ActiveBreach g_ab = { 0 };
 HANDLE g_abInitializedEvent = NULL;
 
@@ -158,8 +159,8 @@ SyscallTable _GetSyscallTable(void* mapped_base) {
             uint8_t* func_ptr = (uint8_t*)mapped_base + func_rva;
 
             if (func_ptr[0] == 0x4C && func_ptr[1] == 0x8B &&
-                func_ptr[2] == 0xD1 && func_ptr[3] == 0xB8) 
-            
+                func_ptr[2] == 0xD1 && func_ptr[3] == 0xB8)
+
             {
 
                 uint32_t ssn = *(uint32_t*)(func_ptr + 4);
@@ -211,11 +212,11 @@ void _ActiveBreach_Init(ActiveBreach* ab) {
     ab->stub_count = 0;
 }
 
- /* TODO:
- * - Switch to a on-demand based creation model (no static stubs)
- * - Call syscall prologues in ntdll.dll with our args
- * Some enterprise EDR would check the callstack, syscall not originating from ntdll.dll would be flagged
- */
+/* TODO:
+* - Switch to a on-demand based creation model (no static stubs)
+* - Call syscall prologues in ntdll.dll with our args
+* Some enterprise EDR would check the callstack, syscall not originating from ntdll.dll would be flagged
+*/
 void CreateStub(void* target_address, uint32_t ssn) {
     /* Stub layout:
        0x4C, 0x8B, 0xD1, 0xB8, [4-byte ssn], 0x0F, 0x05, 0xC3, zero-pad to 16 bytes.
@@ -266,15 +267,23 @@ int _ActiveBreach_AllocStubs(ActiveBreach* ab, const SyscallTable* table) {
 }
 
 void* _ActiveBreach_GetStub(ActiveBreach* ab, const char* name) {
-    if (!ab || !ab->stubs)
-        return NULL;
+    if (!g_ab_initialized) {
+        fprintf(stderr, "Error: ActiveBreach is not initialized.\n");
+        return (void*)NoOpStub;
+    }
+
+    if (!ab || !ab->stubs) {
+        fprintf(stderr, "Runtime Error: ActiveBreach instance is invalid.\n");
+        return (void*)NoOpStub;
+    }
 
     for (size_t i = 0; i < ab->stub_count; i++) {
         if (strcmp(ab->stubs[i].name, name) == 0)
             return ab->stubs[i].stub;
     }
 
-    return NULL;
+    fprintf(stderr, "Runtime Error: Stub '%s' not found in ActiveBreach.\n", name);
+    return (void*)NoOpStub;
 }
 
 void _ActiveBreach_Free(ActiveBreach* ab) {
@@ -468,7 +477,6 @@ static DWORD WINAPI _ActiveBreach_ThreadProc(LPVOID lpParameter) {
 }
 
 void ActiveBreach_launch(void) {
-
     g_abInitializedEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!g_abInitializedEvent)
         fatal_err("Failed to create initialization event");
@@ -485,8 +493,9 @@ void ActiveBreach_launch(void) {
 
     WaitForSingleObject(g_abInitializedEvent, INFINITE);
     CloseHandle(g_abInitializedEvent);
-
     g_abInitializedEvent = NULL;
+
+    g_ab_initialized = true;
 
     CloseHandle(hThread);
 }
