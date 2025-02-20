@@ -16,7 +16,7 @@ For a deeper technical breakdown on why, see > [TECH.md](TECH.md).
 
 <br>
 
-# Bypasses 🔑
+# Bypasses
 
 ## **Driverless**  
 
@@ -62,7 +62,6 @@ User Process
 User Process
     │
     ├──▶ ab_call("NtCreateFile")  <─── (Not using "CreateFile" as ActiveBreach only supports Nt functions)
-    │         │
     │         │
     │         │
     │         │
