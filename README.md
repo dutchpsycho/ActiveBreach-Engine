@@ -2,27 +2,27 @@
 
 ## Project Overview  
 
-**Syscall Proxy** is an open-source research project developed by **TITAN Softwork Solutions** and inspired by [MDSEC](https://www.mdsec.co.uk/2020/12/bypassing-user-mode-hooks-and-direct-invocation-of-system-calls-for-red-teams/).  
+**Syscall Proxy** is an open-source research project developed by **TITAN Softwork Solutions** with inspiration from [MDSEC](https://www.mdsec.co.uk/2020/12/bypassing-user-mode-hooks-and-direct-invocation-of-system-calls-for-red-teams/), SysWhisperer & Hellsgate.  
 
-It implements a **stub-based syscall proxying system**, allowing **direct invocation of system calls** while bypassing traditional user-mode hooks, anti-cheat, and antivirus monitoring.  
+This implements a stub-based internal syscall dispatcher which bypasses all usermode hooks and sidesteps lower level kernel API's (EDR/AC/AV evasion tech)
 
-This project is powered by **ActiveBreach**, a dedicated syscall execution framework that:  
+This project is powered by **ActiveBreach**, a dedicated syscall execution we built framework that:
 - Dynamically extracts **system service numbers (SSNs)** from `ntdll.dll`
-- Constructs **syscall stubs** for direct execution  
+- Constructs **syscall stubs** for direct execution
 - Uses a **dispatcher model** to invoke syscalls without routing through user-mode APIs
-- Leverages a **callback** to make sure the syscall was not intercepted.
+- Leverages a **callback** to prevent debugging.
 
-For a deeper technical breakdown, see > [TECH.md](TECH.md).  
+For a deeper technical breakdown on why, see > [TECH.md](TECH.md).  
 
 <br>
 
-# Features 💎
+# Bypasses 🔑
 
 ## **Driverless**  
 
 | **Bypass**                                      | **Description**                                                                        |
 |-------------------------------------------------|----------------------------------------------------------------------------------------|
-| **Global hooks on `ntdll.dll`**                 | Loads a clean copy of `ntdll.dll` from disk, avoiding in-memory modifications.         |
+| **Global hooks on `ntdll.dll`**                 | Reads `ntdll.dll` directly into buffer, bypassing any API's monitoring lib loading.    |
 | **Remote process `ntdll.dll` hooks**            | Uses internal ActiveBreach dispatcher instead of calling hooked `ntdll.dll` directly.  |
 | **Partial YARA/CADA evasion**                   | Minimizes `ntdll.dll` presence in memory by zeroing out portions.                      |
 
@@ -30,7 +30,7 @@ For a deeper technical breakdown, see > [TECH.md](TECH.md).
 
 ## **Kernel Driver**  
 
-| **Sidestep**                      | **Description**                                                             |
+| **Sidestep**                       | **Description**                                                             |
 |------------------------------------|-----------------------------------------------------------------------------|
 | **PsSetLoadImageNotifyRoutine**    | Loads `ntdll.dll` manually, avoiding kernel notifications (`PsApi`).        |
 | **MmLoadSystemImage**              | Maps `ntdll.dll` manually, preventing system image load tracking.           |
@@ -122,64 +122,20 @@ status = ab_call(NtQuerySystemInformation_t, "NtQuerySystemInformation", infoCla
 ### 4. Cleanup
 No manual cleanup is needed—resources are automatically released at program exit.
 
----
-
-## **How Does This Work Under the Hood?**
-
-### **1. Syscall Proxying & Stub Generation**
-1. **Mapping a Clean Copy of `ntdll.dll`**  
-   - `ntdll.dll` is located in *System32* and mapped into the process's private memory.  
-   - This prevents interaction with the system's in-memory version, which may be hooked by security tools.
-
-2. **Extracting System Service Numbers (SSNs)**  
-   - The exports of `ntdll.dll` are parsed to extract **SSNs** (System Service Numbers).  
-   - The exception directory is checked to detect potential **global hooks** applied by security tools.
-
-3. **Stub Generation & Execution**  
-   - The **stub manager** generates **lightweight syscall stubs** (around ~500 stubs, totaling ~8KB in memory).  
-   - Each stub is mapped into executable memory and associated with its corresponding **SSN**.
-
-4. **Fetching & Executing Syscalls**  
-   - When a syscall is requested, the **stub manager retrieves the corresponding stub**.  
-   - The stub is cast to a function pointer and executed, ensuring **direct syscall execution**.  
-   - This **bypasses user-mode API hooks**, preventing detection by traditional monitoring tools.
-
-5. **Execution Flow in Assembly (x64 Fastcall Convention)**  
-   - Moves **`rcx` into `r10`** (x64 fastcall convention).  
-   - Loads **SSN** into `eax`.  
-   - Executes **`syscall`** and returns the status code (`ret`).  
-
----
-
-### **2. Worker Thread Model (Multi-Threaded Execution)**
-- **A dedicated worker thread** now manages syscall execution.  
-- Uses a **dispatcher event model** to handle system calls without blocking the main thread.  
-- Enables **synchronous** (blocking) and **asynchronous** (non-blocking) execution, improving performance.  
-- Allows **multiple syscalls to be handled concurrently**, increasing efficiency.
-
----
-
-### **3. Asynchronous Procedure Call (APC) Syscall System**
-- **Leverages APCs (Asynchronous Procedure Calls) for indirect execution.**  
-- Uses **APC injection** to schedule syscalls at specific execution points.  
-- Enables execution in a **different thread context**, reducing the risk of detection.  
-- Supports **queued syscalls** via `NtQueueApcThread`, allowing syscall execution inside alertable threads.  
-- Works in tandem with the **stub-based system**, dynamically resolving and executing syscalls.  
-
 <br>
 
 ## Requirements:
-- Windows, 11, x64 (Pending Win10 Compatibility)
-- Visual Studio, C++ 17
+- Win11/10, x64
+- MSVC, C++ 17/20
 
 ### Compiling
-1. Open `HookBypass.sln` in Visual Studio.
-2. Build the solution (Release)
+1. Open `ActiveBreach.sln` in Visual Studio.
+2. Build the solution
 
 <br>
 
 ### **License & Ownership**  
-**ActiveBreach** is a research project developed by **TITAN Softwork Solutions** and is licensed under:  
+**ActiveBreach** is a research project developed by **TITAN Softwork Solutions** and is licensed under: 
 
 ### **Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)**  
 You are free to:  
@@ -196,4 +152,4 @@ Full License: [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)
 <br>
 
 ## Disclaimer
-I am not responsible for anything done with this code. It is provided under public domain and is free-use, what users do with this falls under their personal obligations. I do not condone unethical use of this project, you are liable for your own actions.
+We am not responsible for anything done with this code. It is provided under public domain and is free-use, what users do with this falls under their personal obligations. I do not condone unethical use of this project, you are liable for your own actions.
