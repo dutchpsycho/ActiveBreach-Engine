@@ -1,4 +1,4 @@
-![MDSEC](https://www.mdsec.co.uk/wp-content/themes/mdsec/img/mdsec-logo.svg)
+![TITAN](https://avatars.githubusercontent.com/u/199383721?s=200&v=4)
 
 ## Project Overview  
 
