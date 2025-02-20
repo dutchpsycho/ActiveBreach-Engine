@@ -39,25 +39,17 @@
 #include <cstring>
 #include <cstdarg>
 
-
 namespace {
 
-    [[noreturn]] void _fatal_err(const char* msg) {
+    NTSTATUS _fatal_err(const char* msg) {
         std::cerr << msg << std::endl;
-        exit(1);
+        return STATUS_UNSUCCESSFUL;
     }
 
     void _Zero(void* buffer, size_t size) {
         SecureZeroMemory(buffer, size);
         VirtualFree(buffer, 0, MEM_RELEASE);
     }
-
-    #define XOR_KEY 0x5A
-
-    // ntdll.dll, if plaintext then EDR will pick up it
-    static const wchar_t enc[] = {
-        0x0036, 0x0036, 0x003E, 0x0074, 0x0036, 0x0036, 0x003E, 0x002E, 0x0034
-    };
 
     void _decode(wchar_t* decoded, size_t size) {
         for (size_t i = 0; i < size; i++) {
@@ -78,8 +70,7 @@ namespace {
         if (swprintf(path, MAX_PATH, L"%s\\%s", system_dir, decoded) < 0)
             _fatal_err("Failed to build path");
 
-        HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ,
-            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file == INVALID_HANDLE_VALUE)
             _fatal_err("Failed to open file");
 
@@ -98,6 +89,7 @@ namespace {
         CloseHandle(file);
 
         *out_size = file_size;
+
         return buffer;
     }
 
@@ -171,11 +163,14 @@ namespace {
             return (it != _syscall_stubs.end()) ? it->second : nullptr;
         }
 
-    /* TODO:
-    * - Switch to a on-demand based creation model (no static stubs)
-    * - Call syscall prologues in ntdll.dll with our args
-    *   Some enterprise EDR would check the callstack, syscall not originating from ntdll.dll would be flagged
-     */  
+
+        // ---------------------------------------------------------------------------------------------------------
+        // TODO:
+        // - Switch to a on-demand based creation model (no static stubs)
+        // - Call syscall prologues in ntdll.dll with our args
+        //  Some enterprise EDR would check the callstack, syscall not originating from ntdll.dll would be flagged
+        // ---------------------------------------------------------------------------------------------------------
+
     private:
         void _CreateStub(void* target_address, uint32_t ssn) {
             // Stub layout (16 bytes):
@@ -202,11 +197,10 @@ namespace {
 
     //------------------------------------------------------------------------------
     // Dispatcher Globals and Structures
+    // All stubs are assumed to have signature:
+    // ULONG_PTR NTAPI Fn(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
     //------------------------------------------------------------------------------
 
-    // All stubs are assumed to have signature:
-    // ULONG_PTR NTAPI Fn(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
-    //                     ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
     typedef ULONG_PTR(NTAPI* _ABStubFn)(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
         ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
 
@@ -226,14 +220,19 @@ namespace {
 
 #define DISPATCH_CALL(n, ...) case n: ret = fn(__VA_ARGS__); break;
 
-//------------------------------------------------------------------------------
-// Dispatcher Thread Function
-//------------------------------------------------------------------------------
+
+    //------------------------------------------------------------------------------
+    // Dispatcher Thread Function
+    //------------------------------------------------------------------------------
 
     DWORD WINAPI _ActiveBreach_Dispatcher(LPVOID /*lpParameter*/) {
         if (!_g_abCallEvent)
             _fatal_err("Dispatcher event not created");
+
         for (;;) {
+            if (_g_abCallEvent == NULL)
+                _fatal_err("Invalid dispatcher event handle");
+
             WaitForSingleObject(_g_abCallEvent, INFINITE);
 
             EnterCriticalSection(&_g_abCallCS);
@@ -261,7 +260,10 @@ namespace {
             _g_abCallRequest.ret = ret;
             LeaveCriticalSection(&_g_abCallCS);
 
-            SetEvent(req.complete);
+            if (req.complete)
+                SetEvent(req.complete);
+            else
+                _fatal_err("Invalid completion event handle");
         }
 
         return 0; // Never reached
@@ -282,6 +284,7 @@ namespace {
         return 0;
     }
 
+
     //------------------------------------------------------------------------------
     // Callback Implementation
     //------------------------------------------------------------------------------
@@ -296,6 +299,7 @@ namespace {
         if (current_ret_addr != state.ret_addr) { RaiseException(ACTIVEBREACH_SYSCALL_RETURNMODIFIED, 0, 0, nullptr); }
         if (elapsed > SYSCALL_TIME_THRESHOLD) { RaiseException(ACTIVEBREACH_SYSCALL_LONGSYSCALL, 0, 0, nullptr); }
     }
+
 
     //------------------------------------------------------------------------------
     // ActiveBreach call Implementation
@@ -336,7 +340,9 @@ namespace {
         EnterCriticalSection(&_g_abCallCS);
         ULONG_PTR ret = _g_abCallRequest.ret;
         LeaveCriticalSection(&_g_abCallCS);
-        CloseHandle(req.complete);
+
+        if (req.complete)
+            CloseHandle(req.complete);
 
         ActiveBreach_Callback(execState);
 
@@ -381,12 +387,12 @@ extern "C" void ActiveBreach_launch() {
     }
 }
 
-NTSTATUS NTAPI DefaultStub(...) {
+NTSTATUS NTAPI DefaultStub(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR) {
     return STATUS_UNSUCCESSFUL;
 }
 
-// program would crash if activebreach was NOT initalized bc of returning a nullptr
-// caused cfg hell, fixed by returning a safe ptr
+// Program would crash if activebreach was NOT initalized bc of returning a nullptr
+// Caused cfg hell, fixed by returning a safe ptr
 extern "C" void* _ab_get_stub(const char* name) {
     if (!name)
         return reinterpret_cast<void*>(&DefaultStub);

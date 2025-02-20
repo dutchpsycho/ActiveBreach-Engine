@@ -8,6 +8,8 @@ typedef NTSTATUS(NTAPI* NtQuerySystemInformation_t)(ULONG, PVOID, ULONG, PULONG)
 
 int main() {
 
+    ActiveBreach_launch();
+
     ULONG buffer_size = 0x1000;
     PVOID buffer = nullptr;
     ULONG return_length = 0;

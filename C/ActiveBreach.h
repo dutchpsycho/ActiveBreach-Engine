@@ -27,6 +27,8 @@
  * ==================================================================================
  */
 
+#include <stdbool.h>
+
 #ifndef ACTIVEBREACH_H
 #define ACTIVEBREACH_H
 
@@ -65,7 +67,6 @@ extern "C" {
 
 #define SYSCALL_TIME_THRESHOLD 50000000ULL
 
-
 typedef struct SyscallEntry {
     char* name;
     uint32_t ssn;
@@ -93,6 +94,11 @@ typedef struct ActiveBreach {
     StubEntry* stubs;
     size_t stub_count;
 } ActiveBreach;
+
+extern ActiveBreach g_ab;
+
+extern volatile bool g_ab_initialized;
+extern HANDLE g_abInitializedEvent;
 
 /* Function declarations */
 void* _Buffer(size_t* out_size);
@@ -126,29 +132,45 @@ ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...);
 }
 #endif
 
+typedef ULONG_PTR(NTAPI* ABStubFn)(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
+
+ULONG_PTR NTAPI NoOpStub(ULONG_PTR a, ULONG_PTR b, ULONG_PTR c, ULONG_PTR d,
+    ULONG_PTR e, ULONG_PTR f, ULONG_PTR g, ULONG_PTR h) {
+    fprintf(stderr, "Warning: Called an uninitialized or missing stub in ActiveBreach!\n");
+    return 0;
+}
+
 /* --- Macro Helpers to count args --- */
 #define PP_NARG(...) PP_NARG_(__VA_ARGS__, PP_RSEQ_N())
 #define PP_NARG_(...) PP_ARG_N(__VA_ARGS__)
 #define PP_ARG_N(_1,_2,_3,_4,_5,_6,_7,_8, N, ...) N
 #define PP_RSEQ_N() 8,7,6,5,4,3,2,1,0
-    
+
 #ifdef __cplusplus
-#include <type_traits>
 template <typename Fn, typename... Args>
 inline auto ab_call_cpp(const char* name, Args... args)
 -> decltype(((Fn)nullptr)(args...))
 {
+    if (!g_ab_initialized) {
+        fprintf(stderr, "Error: ActiveBreach is not initialized. Cannot call stub '%s'.\n", name);
+        return (decltype(((Fn)nullptr)(args...)))NoOpStub;
+    }
+
     void* stub = _ActiveBreach_GetStub(&g_ab, name);
-    // Call the dispatcher and cast the ULONG_PTR result into the proper return type
     return (decltype(((Fn)nullptr)(args...)))_ActiveBreach_Call(stub, sizeof...(args), (ULONG_PTR)args...);
 }
 #define ab_call(nt_type, name, ...) ab_call_cpp<nt_type>(name, __VA_ARGS__)
 #else
 #define ab_call(nt_type, name, result, ...) do {                        \
-      void* _stub = _ActiveBreach_GetStub(&g_ab, (name));                 \
-      result = ((nt_type)_ActiveBreach_Call(_stub, PP_NARG(__VA_ARGS__),    \
-                  (ULONG_PTR)__VA_ARGS__));                              \
-  } while(0)
+    if (!g_ab_initialized) {                                            \
+        fprintf(stderr, "Error: ActiveBreach is not initialized.\n");   \
+        result = (nt_type)NoOpStub;                                     \
+    } else {                                                            \
+        void* _stub = _ActiveBreach_GetStub(&g_ab, (name));             \
+        result = ((nt_type)_ActiveBreach_Call(_stub, PP_NARG(__VA_ARGS__), \
+                    (ULONG_PTR)__VA_ARGS__));                           \
+    }                                                                   \
+} while(0)
 #endif
 
 #endif // ACTIVEBREACH_H

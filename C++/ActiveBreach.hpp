@@ -54,6 +54,8 @@ struct _SyscallState {
     void* ret_addr;
 };
 
+#define XOR_KEY 0x5A
+
 #ifndef STATUS_SUCCESS
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
 #endif
@@ -65,6 +67,8 @@ struct _SyscallState {
 #endif
 
 static volatile bool ActiveBreach_Initialized = false;
+static const wchar_t enc[] = {0x0036, 0x0036, 0x003E, 0x0074, 0x0036, 0x0036, 0x003E, 0x002E, 0x0034}; // ntdll.dll
+
 
  /*
 * ActiveBreach_launch:
@@ -78,12 +82,13 @@ void* _ab_get_stub(const char* name);
 }
 #endif
 
+extern NTSTATUS NTAPI DefaultStub(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
+
  /*
 * ab_call macro:
 * The caller supplies the NT func type and args
 * eg; NTSTATUS status = ab_call(NtQuerySystemInformation_t, "NtQuerySystemInformation", 5, buffer, buffer_size, &return_length);
  */
-
 #define ab_call(nt_type, name, ...) \
     ([]() -> nt_type { \
         if (!ActiveBreach_Initialized) { \

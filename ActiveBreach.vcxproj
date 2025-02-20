@@ -31,7 +31,7 @@
     <ProjectGuid>{7785cdec-4d79-4937-8f3c-50aeab42029f}</ProjectGuid>
     <RootNamespace>ActiveBreach</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
-    <ProjectName>ACTIVEBREACH</ProjectName>
+    <ProjectName>C++</ProjectName>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
