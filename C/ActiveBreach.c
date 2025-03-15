@@ -28,7 +28,6 @@
  */
 
 #include "ActiveBreach.h"
-
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,7 +70,7 @@ void abfree(void* ptr) {
 
 #define XOR_KEY 0x5A
 
-// ntdll.dll, if plaintext then EDR will pick up it
+// ntdll.dll, if plaintext then edr will pick it up
 static const wchar_t enc[] = {
     0x0036, 0x0036, 0x003E, 0x0074, 0x0036, 0x0036, 0x003E, 0x002E, 0x0034
 };
@@ -160,17 +159,12 @@ SyscallTable _GetSyscallTable(void* mapped_base) {
 
             if (func_ptr[0] == 0x4C && func_ptr[1] == 0x8B &&
                 func_ptr[2] == 0xD1 && func_ptr[3] == 0xB8)
-
             {
-
                 uint32_t ssn = *(uint32_t*)(func_ptr + 4);
                 entries[count].name = strdup(func_name);
-
                 if (!entries[count].name)
                     fatal_err("Failed to duplicate function name");
-
                 entries[count].ssn = ssn;
-
                 count++;
             }
         }
@@ -178,19 +172,15 @@ SyscallTable _GetSyscallTable(void* mapped_base) {
 
     if (count == 0) {
         free(entries);
-
         table.entries = NULL;
         table.count = 0;
     }
-
     else {
         SyscallEntry* resized_entries = (SyscallEntry*)realloc(entries, count * sizeof(SyscallEntry));
-
         if (!resized_entries) {
             free(entries);
             fatal_err("Failed to reallocate memory for syscall entries");
         }
-
         table.entries = resized_entries;
         table.count = count;
     }
@@ -201,7 +191,6 @@ SyscallTable _GetSyscallTable(void* mapped_base) {
 //------------------------------------------------------------------------------
 // ABINTERNALS
 //------------------------------------------------------------------------------
-
 void _ActiveBreach_Init(ActiveBreach* ab) {
     if (!ab)
         fatal_err("ActiveBreach pointer is NULL");
@@ -212,15 +201,10 @@ void _ActiveBreach_Init(ActiveBreach* ab) {
     ab->stub_count = 0;
 }
 
-/* TODO:
-* - Switch to a on-demand based creation model (no static stubs)
-* - Call syscall prologues in ntdll.dll with our args
-* Some enterprise EDR would check the callstack, syscall not originating from ntdll.dll would be flagged
+/* Stub layout:
+   0x4C, 0x8B, 0xD1, 0xB8, [4-byte ssn], 0x0F, 0x05, 0xC3, zero-pad to 16 bytes.
 */
 void CreateStub(void* target_address, uint32_t ssn) {
-    /* Stub layout:
-       0x4C, 0x8B, 0xD1, 0xB8, [4-byte ssn], 0x0F, 0x05, 0xC3, zero-pad to 16 bytes.
-    */
     uint8_t* stub = (uint8_t*)target_address;
     stub[0] = 0x4C; // mov r10, rcx
     stub[1] = 0x8B;
@@ -230,9 +214,9 @@ void CreateStub(void* target_address, uint32_t ssn) {
     stub[8] = 0x0F; // syscall
     stub[9] = 0x05;
     stub[10] = 0xC3; // ret
+    /* Remaining bytes are zeroed */
 }
 
-// Allocate executable memory for stubs and populate them based on the syscall table
 int _ActiveBreach_AllocStubs(ActiveBreach* ab, const SyscallTable* table) {
     if (!ab || !table)
         fatal_err("ActiveBreach or SyscallTable pointer is NULL");
@@ -315,17 +299,10 @@ void _ActiveBreach_Cleanup(void) {
 //------------------------------------------------------------------------------
 // Call Dispatcher
 //------------------------------------------------------------------------------
-
-// I assume that all stubs have signature: 
-//    ULONG_PTR NTAPI Fn(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR)
-// (i.e. up to 8 arguments). May adjust.
-typedef ULONG_PTR(NTAPI* ABStubFn)(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
-    ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
-
 typedef struct _ABCallRequest {
     void* stub;          // Func ptr to call
-    size_t arg_count;    // Num of args (0..8)
-    ULONG_PTR args[8];   // Args (unused slots are 0)
+    size_t arg_count;    // Num of args (0..16)
+    ULONG_PTR args[16];  // Args (unused slots are 0)
     ULONG_PTR ret;       // Ret value (to be filled in)
     HANDLE complete;     // Event to signal completion
 } ABCallRequest;
@@ -334,7 +311,24 @@ static HANDLE g_abCallEvent = NULL; // Signaled when a new request is posted
 static CRITICAL_SECTION g_abCallCS; // Protects g_abCallRequest
 static ABCallRequest g_abCallRequest; // Shared request (one at a time)
 
-// The worker thread enters this loop.
+static void _ActiveBreach_Callback(const SyscallState* state) {
+    uint64_t end_time = __rdtsc();
+    uint64_t elapsed = end_time - state->start_time;
+
+    void* current_stack_ptr = _AddressOfReturnAddress();
+    void* current_ret_addr = _ReturnAddress();
+
+    if (current_stack_ptr != state->stack_ptr) {
+        RaiseException(ACTIVEBREACH_SYSCALL_STACKPTRMODIFIED, 0, 0, NULL);
+    }
+    if (current_ret_addr != state->ret_addr) {
+        RaiseException(ACTIVEBREACH_SYSCALL_RETURNMODIFIED, 0, 0, NULL);
+    }
+    if (elapsed > SYSCALL_TIME_THRESHOLD) {
+        RaiseException(ACTIVEBREACH_SYSCALL_LONGSYSCALL, 0, 0, NULL);
+    }
+}
+
 static DWORD WINAPI _ActiveBreach_Dispatcher(LPVOID lpParameter) {
     (void)lpParameter; // Unused
 
@@ -343,29 +337,55 @@ static DWORD WINAPI _ActiveBreach_Dispatcher(LPVOID lpParameter) {
     InitializeCriticalSection(&g_abCallCS);
 
     for (;;) {
-
         WaitForSingleObject(g_abCallEvent, INFINITE);
 
         EnterCriticalSection(&g_abCallCS);
         ABCallRequest req = g_abCallRequest;
         LeaveCriticalSection(&g_abCallCS);
 
-
         ABStubFn fn = (ABStubFn)req.stub;
         ULONG_PTR ret = 0;
 
         switch (req.arg_count) {
-        case 0: ret = fn(0, 0, 0, 0, 0, 0, 0, 0); break;
-        case 1: ret = fn(req.args[0], 0, 0, 0, 0, 0, 0, 0); break;
-        case 2: ret = fn(req.args[0], req.args[1], 0, 0, 0, 0, 0, 0); break;
-        case 3: ret = fn(req.args[0], req.args[1], req.args[2], 0, 0, 0, 0, 0); break;
-        case 4: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], 0, 0, 0, 0); break;
-        case 5: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], 0, 0, 0); break;
-        case 6: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], 0, 0); break;
-        case 7: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], 0); break;
-        case 8: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
-            req.args[4], req.args[5], req.args[6], req.args[7]); break;
-
+        case 0:  ret = fn(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); break;
+        case 1:  ret = fn(req.args[0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); break;
+        case 2:  ret = fn(req.args[0], req.args[1], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); break;
+        case 3:  ret = fn(req.args[0], req.args[1], req.args[2], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); break;
+        case 4:  ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); break;
+        case 5:  ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); break;
+        case 6:  ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); break;
+        case 7:  ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], 0, 0, 0, 0, 0, 0, 0, 0, 0); break;
+        case 8:  ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
+            req.args[4], req.args[5], req.args[6], req.args[7],
+            0, 0, 0, 0, 0, 0, 0, 0); break;
+        case 9:  ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
+            req.args[4], req.args[5], req.args[6], req.args[7],
+            req.args[8], 0, 0, 0, 0, 0, 0, 0); break;
+        case 10: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
+            req.args[4], req.args[5], req.args[6], req.args[7],
+            req.args[8], req.args[9], 0, 0, 0, 0, 0, 0); break;
+        case 11: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
+            req.args[4], req.args[5], req.args[6], req.args[7],
+            req.args[8], req.args[9], req.args[10], 0, 0, 0, 0, 0); break;
+        case 12: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
+            req.args[4], req.args[5], req.args[6], req.args[7],
+            req.args[8], req.args[9], req.args[10], req.args[11], 0, 0, 0, 0); break;
+        case 13: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
+            req.args[4], req.args[5], req.args[6], req.args[7],
+            req.args[8], req.args[9], req.args[10], req.args[11],
+            req.args[12], 0, 0, 0); break;
+        case 14: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
+            req.args[4], req.args[5], req.args[6], req.args[7],
+            req.args[8], req.args[9], req.args[10], req.args[11],
+            req.args[12], req.args[13], 0, 0); break;
+        case 15: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
+            req.args[4], req.args[5], req.args[6], req.args[7],
+            req.args[8], req.args[9], req.args[10], req.args[11],
+            req.args[12], req.args[13], req.args[14], 0); break;
+        case 16: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
+            req.args[4], req.args[5], req.args[6], req.args[7],
+            req.args[8], req.args[9], req.args[10], req.args[11],
+            req.args[12], req.args[13], req.args[14], req.args[15]); break;
         default:
             fatal_err("Invalid argument count in call dispatcher");
         }
@@ -376,29 +396,15 @@ static DWORD WINAPI _ActiveBreach_Dispatcher(LPVOID lpParameter) {
 
         SetEvent(req.complete);
     }
-
-    // Never reached
     return 0;
-}
-
-void _ActiveBreach_Callback(const SyscallState* state) {
-    uint64_t end_time = __rdtsc();
-    uint64_t elapsed = end_time - state->start_time;
-
-    void* current_stack_ptr = _AddressOfReturnAddress();
-    void* current_ret_addr = _ReturnAddress();
-
-    if (current_stack_ptr != state->stack_ptr) { RaiseException(ACTIVEBREACH_SYSCALL_STACKPTRMODIFIED, 0, 0, NULL); }
-    if (current_ret_addr != state->ret_addr) { RaiseException(ACTIVEBREACH_SYSCALL_RETURNMODIFIED, 0, 0, NULL); }
-    if (elapsed > SYSCALL_TIME_THRESHOLD) { RaiseException(ACTIVEBREACH_SYSCALL_LONGSYSCALL, 0, 0, NULL); }
 }
 
 ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...) {
     if (!stub)
         fatal_err("_ActiveBreach_Call: stub is NULL");
 
-    if (arg_count > 8)
-        fatal_err("_ActiveBreach_Call: Too many arguments (max 8)");
+    if (arg_count > 16)
+        fatal_err("_ActiveBreach_Call: Too many arguments (max 16)");
 
     SyscallState execState;
     execState.start_time = __rdtsc();
@@ -406,7 +412,6 @@ ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...) {
     execState.ret_addr = _ReturnAddress();
 
     ABCallRequest req = { 0 };
-
     req.stub = stub;
     req.arg_count = arg_count;
     va_list vl;
@@ -437,11 +442,8 @@ ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...) {
     return ret;
 }
 
-//------------------------------------------------------------------------------
-// Worker Thread: Init & loop
-//------------------------------------------------------------------------------
 static DWORD WINAPI _ActiveBreach_ThreadProc(LPVOID lpParameter) {
-    (void)lpParameter; // Unused
+    (void)lpParameter;
 
     size_t ab_handle_size;
     void* ab_handle_base = _Buffer(&ab_handle_size);
@@ -461,18 +463,14 @@ static DWORD WINAPI _ActiveBreach_ThreadProc(LPVOID lpParameter) {
     }
     atexit(_ActiveBreach_Cleanup);
 
-    // Init done
     if (g_abInitializedEvent)
         SetEvent(g_abInitializedEvent);
 
-    // Initialize the dispatcher globals
     g_abCallEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
     if (!g_abCallEvent)
         fatal_err("Failed to create dispatcher event");
 
-    // Enter loop
     _ActiveBreach_Dispatcher(NULL);
-
     return 0;
 }
 
@@ -496,6 +494,13 @@ void ActiveBreach_launch(void) {
     g_abInitializedEvent = NULL;
 
     g_ab_initialized = true;
-
     CloseHandle(hThread);
+}
+
+ULONG_PTR NTAPI NoOpStub(ULONG_PTR a, ULONG_PTR b, ULONG_PTR c, ULONG_PTR d,
+    ULONG_PTR e, ULONG_PTR f, ULONG_PTR g, ULONG_PTR h,
+    ULONG_PTR i, ULONG_PTR j, ULONG_PTR k, ULONG_PTR l,
+    ULONG_PTR m, ULONG_PTR n, ULONG_PTR o, ULONG_PTR p) {
+    fprintf(stderr, "Warning: Called an uninitialized or missing stub in ActiveBreach!\n");
+    return 0;
 }

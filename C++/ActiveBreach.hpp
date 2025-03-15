@@ -54,49 +54,40 @@ struct _SyscallState {
     void* ret_addr;
 };
 
-#define XOR_KEY 0x5A
-
 #ifndef STATUS_SUCCESS
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
-#endif
-#ifndef STATUS_UNSUCCESSFUL
-#define STATUS_UNSUCCESSFUL ((NTSTATUS)0xC0000001L)
 #endif
 #ifndef STATUS_INFO_LENGTH_MISMATCH
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
 #endif
 
-static volatile bool ActiveBreach_Initialized = false;
-static const wchar_t enc[] = {0x0036, 0x0036, 0x003E, 0x0074, 0x0036, 0x0036, 0x003E, 0x002E, 0x0034}; // ntdll.dll
+/*
+ * ActiveBreach_launch:
+ * Launches the global ActiveBreach handler
+ * Internally, it maps ntdll.dll & extracts ssns,builds syscall stubs, and sets up the ActiveBreach system
+*/
 
-
- /*
-* ActiveBreach_launch:
-* Launches the global ActiveBreach handler
-* Internally, it maps ntdll.dll & extracts ssns, builds syscall stubs, and sets up the ActiveBreach system
- */
-void ActiveBreach_launch();
-void* _ab_get_stub(const char* name);
+    void ActiveBreach_launch(const char* notify = nullptr);
+	void* _ab_get_stub(const char* name);
 
 #ifdef __cplusplus
 }
 #endif
 
-extern NTSTATUS NTAPI DefaultStub(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
+/*
+ * ab_call macro:
+ * The caller supplies the NT func type and args
+ * eg; NTSTATUS status = ab_call(NtQuerySystemInformation_t, "NtQuerySystemInformation", 5, buffer, buffer_size, &return_length);
+*/
 
- /*
-* ab_call macro:
-* The caller supplies the NT func type and args
-* eg; NTSTATUS status = ab_call(NtQuerySystemInformation_t, "NtQuerySystemInformation", 5, buffer, buffer_size, &return_length);
- */
 #define ab_call(nt_type, name, ...) \
     ([]() -> nt_type { \
-        if (!ActiveBreach_Initialized) { \
-            fprintf(stderr, "Activebreach not launched, launch it. (ActiveBreach_launch)\n"); \
-            return reinterpret_cast<nt_type>(&DefaultStub); \
+        void* stub = _ab_get_stub(name); \
+        if (!stub) { \
+            fprintf(stderr, "Stub \"%s\" not found\n", name); \
+            return (nt_type)0; \
         } \
-        return reinterpret_cast<nt_type>(_ab_get_stub(name)); \
+        return reinterpret_cast<nt_type>(stub); \
     }())(__VA_ARGS__)
-
 
 #endif

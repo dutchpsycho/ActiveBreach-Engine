@@ -7,8 +7,8 @@
 typedef NTSTATUS(NTAPI* NtQuerySystemInformation_t)(ULONG, PVOID, ULONG, PULONG);
 
 int main() {
-
-    ActiveBreach_launch();
+    // remove the " " if u dont want operational msg
+    ActiveBreach_launch("LMK");
 
     ULONG buffer_size = 0x1000;
     PVOID buffer = nullptr;

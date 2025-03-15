@@ -1,25 +1,29 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <Filter Include="Lab">
-      <UniqueIdentifier>{0426fa26-c6b2-45fc-82f3-762a44199724}</UniqueIdentifier>
-    </Filter>
     <Filter Include="Include">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Core">
       <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
       <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
     </Filter>
+    <Filter Include="Test">
+      <UniqueIdentifier>{20e4215e-66d6-49c8-b13d-4d74b82be89d}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="C++\ActiveBreach.hpp">
+    <ClInclude Include="ActiveBreach.hpp">
       <Filter>Include</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="C++\ActiveBreach.cpp">
-      <Filter>Include</Filter>
+    <ClCompile Include="ActiveBreach.cpp">
+      <Filter>Core</Filter>
     </ClCompile>
-    <ClCompile Include="C++\Example.cpp">
-      <Filter>Lab</Filter>
+    <ClCompile Include="Test.cpp">
+      <Filter>Test</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>

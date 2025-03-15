@@ -1,0 +1,37 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Include">
+      <UniqueIdentifier>{39d78d80-01e5-4771-a184-c6fb7acd6ede}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Src">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Src\Container">
+      <UniqueIdentifier>{a125a77d-0092-4f70-9bd7-8a4da9fda151}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="Main.cpp">
+      <Filter>Src</Filter>
+    </ClCompile>
+    <ClCompile Include="Container\SysInfo.cpp">
+      <Filter>Src\Container</Filter>
+    </ClCompile>
+    <ClCompile Include="Container\Threading.cpp">
+      <Filter>Src\Container</Filter>
+    </ClCompile>
+    <ClCompile Include="Container\Memory.cpp">
+      <Filter>Src\Container</Filter>
+    </ClCompile>
+    <ClCompile Include="..\C\ActiveBreach.c">
+      <Filter>Include</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Infra.h">
+      <Filter>Src</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>

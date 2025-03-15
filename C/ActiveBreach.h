@@ -27,25 +27,25 @@
  * ==================================================================================
  */
 
-#include <stdbool.h>
-
 #ifndef ACTIVEBREACH_H
 #define ACTIVEBREACH_H
 
-#ifdef _MSC_VER
-#define strdup _strdup
-#endif
-
+#include <stdbool.h>
 #include <windows.h>
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdarg.h>
 
+#ifdef _MSC_VER
+#define strdup _strdup
+#endif
+
 #ifdef __cplusplus
 extern "C" {
-    extern HANDLE g_abInitializedEvent;
 #endif
+
+    extern HANDLE g_abInitializedEvent;
 
 #ifndef NTSTATUS
     typedef long NTSTATUS;
@@ -96,11 +96,9 @@ typedef struct ActiveBreach {
 } ActiveBreach;
 
 extern ActiveBreach g_ab;
-
 extern volatile bool g_ab_initialized;
 extern HANDLE g_abInitializedEvent;
 
-/* Function declarations */
 void* _Buffer(size_t* out_size);
 SyscallTable _GetSyscallTable(void* mapped_base);
 void _Cleanup(void* mapped_base);
@@ -112,39 +110,22 @@ void _ActiveBreach_Free(ActiveBreach* ab);
 void _ActiveBreach_Cleanup(void);
 void ActiveBreach_launch(void);
 
-/* Cleanup function; registers with atexit */
-void _ActiveBreach_Cleanup(void);
-
-/* Launch function spawns ab thread that performs initialization and handles ab_calls */
-void ActiveBreach_launch(void);
-
-/* --- Global ActiveBreach instance --- */
-extern ActiveBreach g_ab;
-
-/* --- Call Dispatcher --- */
-/*
-    _ActiveBreach_Call dispatches a call to the worker thread
-    Supports 0..8 ULONG_PTR args
-*/
 ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...);
+
+ULONG_PTR NTAPI NoOpStub(ULONG_PTR a, ULONG_PTR b, ULONG_PTR c, ULONG_PTR d,
+    ULONG_PTR e, ULONG_PTR f, ULONG_PTR g, ULONG_PTR h,
+    ULONG_PTR i, ULONG_PTR j, ULONG_PTR k, ULONG_PTR l,
+    ULONG_PTR m, ULONG_PTR n, ULONG_PTR o, ULONG_PTR p);
+
+    /* --- Macro Helpers to count args --- */
+#define PP_NARG(...) PP_NARG_(__VA_ARGS__, PP_RSEQ_N())
+#define PP_NARG_(...) PP_ARG_N(__VA_ARGS__)
+#define PP_ARG_N( _1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, N, ...) N
+#define PP_RSEQ_N() 16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0
 
 #ifdef __cplusplus
 }
 #endif
-
-typedef ULONG_PTR(NTAPI* ABStubFn)(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
-
-ULONG_PTR NTAPI NoOpStub(ULONG_PTR a, ULONG_PTR b, ULONG_PTR c, ULONG_PTR d,
-    ULONG_PTR e, ULONG_PTR f, ULONG_PTR g, ULONG_PTR h) {
-    fprintf(stderr, "Warning: Called an uninitialized or missing stub in ActiveBreach!\n");
-    return 0;
-}
-
-/* --- Macro Helpers to count args --- */
-#define PP_NARG(...) PP_NARG_(__VA_ARGS__, PP_RSEQ_N())
-#define PP_NARG_(...) PP_ARG_N(__VA_ARGS__)
-#define PP_ARG_N(_1,_2,_3,_4,_5,_6,_7,_8, N, ...) N
-#define PP_RSEQ_N() 8,7,6,5,4,3,2,1,0
 
 #ifdef __cplusplus
 template <typename Fn, typename... Args>
@@ -155,7 +136,6 @@ inline auto ab_call_cpp(const char* name, Args... args)
         fprintf(stderr, "Error: ActiveBreach is not initialized. Cannot call stub '%s'.\n", name);
         return (decltype(((Fn)nullptr)(args...)))NoOpStub;
     }
-
     void* stub = _ActiveBreach_GetStub(&g_ab, name);
     return (decltype(((Fn)nullptr)(args...)))_ActiveBreach_Call(stub, sizeof...(args), (ULONG_PTR)args...);
 }
@@ -172,5 +152,10 @@ inline auto ab_call_cpp(const char* name, Args... args)
     }                                                                   \
 } while(0)
 #endif
+
+typedef ULONG_PTR(NTAPI* ABStubFn)(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
+    ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
+    ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
+    ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
 
 #endif // ACTIVEBREACH_H

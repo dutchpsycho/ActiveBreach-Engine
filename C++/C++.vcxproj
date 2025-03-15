@@ -21,7 +21,7 @@
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <ProjectGuid>{683c1c91-75bd-4b4c-86e4-af76b475e801}</ProjectGuid>
+    <ProjectGuid>{7a12f164-2219-4e9c-9595-eb5397620d6e}</ProjectGuid>
     <RootNamespace>C</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
@@ -127,13 +127,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="ActiveBreach.c" />
+    <ClInclude Include="ActiveBreach.hpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="ActiveBreach.h" />
-  </ItemGroup>
-  <ItemGroup>
-    <None Include="Stub.asm" />
+    <ClCompile Include="ActiveBreach.cpp" />
+    <ClCompile Include="Test.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
