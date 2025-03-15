@@ -2,7 +2,7 @@
 name = "activebreach"
 project = "syscall-proxy"
 version = "0.1.0"
-author = "CrisisEvasion"
+author = "CrisisEvasion, DutchPsycho"
 organization = "TITAN Softwork Solutions"
 license = "CC-BY-NC-4.0"
 repository = "https://github.com/crisisevasion/syscall-proxy"
