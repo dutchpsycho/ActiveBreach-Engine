@@ -1,6 +1,7 @@
 /Dependancies
 */64
 **/target
+**cargo.lock
 
 # Visual Studio
 .vs/
