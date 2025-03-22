@@ -37,9 +37,11 @@
 mod internal;
 
 use std::ptr::{null, null_mut};
-use std::ffi::c_void;
+use std::ffi::{c_void, CStr};
+use std::os::raw::c_char;
+
 use winapi::um::handleapi::CloseHandle;
-use winapi::um::synchapi::WaitForSingleObject;
+use winapi::um::synchapi::{WaitForSingleObject, CreateEventA, SetEvent};
 use winapi::um::winbase::INFINITE;
 use winapi::um::processthreadsapi::CreateThread;
 
@@ -50,79 +52,108 @@ static TLS_CALLBACK: extern "system" fn(*mut c_void, u32, *mut c_void) = tls_cal
 extern "system" fn tls_callback(_hModule: *mut c_void, reason: u32, _reserved: *mut c_void) {
     if reason == winapi::um::winnt::DLL_PROCESS_ATTACH {
         unsafe {
-            ActiveBreach_launch();
+            CreateThread(
+                null_mut(),
+                0,
+                Some(tls_launch_shim),
+                null_mut(),
+                0,
+                null_mut(),
+            );
         }
     }
+}
+
+unsafe extern "system" fn tls_launch_shim(_: *mut winapi::ctypes::c_void) -> u32 {
+    ActiveBreach_launch();
+    0
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn ActiveBreach_launch() {
     let mut ab_handle_size: usize = 0;
+
     let mapped_base = internal::file_buffer::buffer(&mut ab_handle_size);
-    let syscall_table = internal::exports::extract_ssn(mapped_base);
 
-    internal::file_buffer::zero_and_free(mapped_base, ab_handle_size);
+    internal::exports::extract_syscalls(mapped_base as *const u8, ab_handle_size);
 
-    let mut ab_internal = internal::gadget::ActiveBreachInternal::new();
-    ab_internal.build_gadgets(&syscall_table);
-
-    internal::dispatcher::G_AB_INITIALIZED_EVENT = winapi::um::synchapi::CreateEventA(null_mut(), true as i32, false as i32, null());
-    if internal::dispatcher::G_AB_INITIALIZED_EVENT.is_null() {
-        internal::error::fatal_err("Failed to create initialization event");
-    }
     let hThread = CreateThread(
         null_mut(),
         0,
-        Some(internal::dispatcher::thread_proc),
+        Some(internal::dispatch::thread_proc),
         null_mut(),
         0,
         null_mut(),
     );
+
     if hThread.is_null() {
-        internal::error::fatal_err("Failed to create ActiveBreach dispatcher thread");
+        internal::err::fatal_err("failed to create dispatcher thread");
     }
-    WaitForSingleObject(internal::dispatcher::G_AB_INITIALIZED_EVENT, INFINITE);
-    CloseHandle(internal::dispatcher::G_AB_INITIALIZED_EVENT);
-    internal::dispatcher::G_AB_INITIALIZED_EVENT = null_mut();
+
+    internal::file_buffer::zero_and_free(mapped_base as *mut _, ab_handle_size);
+
     CloseHandle(hThread);
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn ab_call(gadget: *mut c_void, args: *const usize, arg_count: usize) -> usize {
-    if gadget.is_null() {
-        panic!("ab_call: gadget is NULL");
+pub unsafe extern "C" fn ab_call(syscall_name: *const u8, args: *const usize, arg_count: usize) -> usize {
+    if syscall_name.is_null() {
+        panic!("ab_call: syscall name is null");
     }
+
     if arg_count > 8 {
-        panic!("ab_call: Too many arguments (max 8)");
+        panic!("ab_call: too many arguments");
     }
+
     if args.is_null() {
-        panic!("ab_call: args is NULL");
+        panic!("ab_call: args is null");
+    }
+
+    let name = match CStr::from_ptr(syscall_name as *const c_char).to_str() {
+        Ok(s) => s,
+        Err(_) => panic!("ab_call: invalid syscall name"),
+    };
+
+    let found = internal::exports::SYSCALL_TABLE
+        .get()
+        .map_or(false, |tbl| tbl.contains_key(name));
+
+    if !found {
+        panic!("ab_call: syscall '{}' not found", name);
     }
 
     let args_slice = std::slice::from_raw_parts(args, arg_count);
 
-    let mut req = internal::dispatcher::ABCallRequest {
-        stub: gadget,
+    let mut syscall_name_buf = [0u8; 64];
+    let name_bytes = name.as_bytes();
+
+    if name_bytes.len() >= 64 {
+        panic!("ab_call: syscall name too long");
+    }
+
+    syscall_name_buf[..name_bytes.len()].copy_from_slice(name_bytes);
+
+    let mut req = internal::dispatch::ABCallRequest {
+        syscall_name: syscall_name_buf,
         arg_count,
         args: [0; 8],
         ret: 0,
-        complete: winapi::um::synchapi::CreateEventA(null_mut(), true as i32, false as i32, null()),
+        complete: CreateEventA(null_mut(), 1, 0, null()),
     };
+
     req.args[..arg_count].copy_from_slice(args_slice);
 
     {
-        let mut guard = internal::dispatcher::G_AB_CALL_REQUEST.lock().unwrap();
+        let mut guard = internal::dispatch::G_AB_CALL_REQUEST.lock().unwrap();
         *guard = req.clone();
     }
-    winapi::um::synchapi::SetEvent(internal::dispatcher::G_AB_CALL_EVENT);
 
-    let complete_handle = req.complete;
-    WaitForSingleObject(complete_handle, INFINITE);
-    CloseHandle(complete_handle);
+    SetEvent(internal::dispatch::G_AB_CALL_EVENT);
 
-    let ret_val = {
-        let guard = internal::dispatcher::G_AB_CALL_REQUEST.lock().unwrap();
-        guard.ret
-    };
-    ret_val
+    WaitForSingleObject(req.complete, INFINITE);
+    CloseHandle(req.complete);
+
+    let guard = internal::dispatch::G_AB_CALL_REQUEST.lock().unwrap();
+
+    guard.ret
 }

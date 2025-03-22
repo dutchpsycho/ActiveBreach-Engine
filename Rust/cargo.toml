@@ -1,20 +1,27 @@
 [package]
-name = "activebreach"
-project = "syscall-proxy"
+name = "ActiveBreach"
 version = "0.1.0"
-author = "CrisisEvasion, DutchPsycho"
-organization = "TITAN Softwork Solutions"
+edition = "2021"
 license = "CC-BY-NC-4.0"
 repository = "https://github.com/crisisevasion/syscall-proxy"
-edition = "2021"
 
 [dependencies]
 lazy_static = "1.5.0"
-winapi = { version = "0.3", features = ["ntdef", "winbase", "minwindef", "handleapi", "winnt", "sysinfoapi", "fileapi", "processthreadsapi", "memoryapi", "synchapi", "errhandlingapi", "libloaderapi"] }
+once_cell = "1.21.1"
+winapi = { version = "0.3", features = [
+    "ntdef", "winbase", "minwindef", "handleapi", "winnt",
+    "sysinfoapi", "fileapi", "processthreadsapi", "memoryapi",
+    "synchapi", "errhandlingapi", "libloaderapi"
+] }
 
 [lib]
-name = "activebreach"
-crate-type = ["cdylib", "rlib"]
+name = "ActiveBreach"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "breacher"
+path = "test/entry.rs"
 
 [profile.release]
 lto = true
@@ -24,3 +31,8 @@ strip = "symbols"
 panic = "abort"
 codegen-units = 1
 incremental = false
+
+[profile.dev]
+lto = true
+opt-level = 0
+debug = true

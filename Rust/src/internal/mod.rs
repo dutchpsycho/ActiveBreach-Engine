@@ -1,7 +1,6 @@
-pub mod encryption;
-pub mod error;
+pub mod crypto;
+pub mod err;
 pub mod file_buffer;
 pub mod exports;
-pub mod gadget;
-pub mod dispatcher;
-pub mod syscalls;
+pub mod stub;
+pub mod dispatch;

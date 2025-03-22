@@ -1,6 +1,16 @@
+
 use std::ffi::c_void;
+
 use core::arch::asm;
+
 use winapi::um::winnt::LIST_ENTRY;
+use winapi::um::errhandlingapi::RaiseException;
+use winapi::shared::minwindef::{DWORD, ULONG};
+use winapi::shared::basetsd::ULONG_PTR;
+
+const AB_SYSCALL_STACK_CORRUPT: DWORD = 0xEAB10001;
+const AB_SYSCALL_RETADDR_CORRUPT: DWORD = 0xEAB10002;
+const AB_SYSCALL_TIME_EXCEEDED:  DWORD = 0xEAB10003;
 
 #[repr(C)]
 pub struct PEB {
@@ -59,7 +69,7 @@ pub unsafe fn get_rdtsc() -> u64 {
     {
         0
     }
-}
+}   
 
 #[repr(C)]
 pub struct SyscallState {
@@ -68,20 +78,56 @@ pub struct SyscallState {
     pub ret_addr: usize,
 }
 
-pub unsafe fn activebreach_callback(state: &SyscallState) {
+impl SyscallState {
+    pub fn capture() -> Self {
+        unsafe {
+            Self {
+                start_time: get_rdtsc(),
+                stack_ptr: sp(),
+                ret_addr: ret_addr(),
+            }
+        }
+    }
+
+    pub fn validate(&self) {
+        unsafe {
+            let end_time = get_rdtsc();
+            let elapsed = end_time - self.start_time;
+            let current_stack_ptr = sp();
+            let current_ret_addr = ret_addr();
+
+            if current_stack_ptr != self.stack_ptr {
+                RaiseException(AB_SYSCALL_STACK_CORRUPT, 0, 0, std::ptr::null());
+            }
+            if current_ret_addr != self.ret_addr {
+                RaiseException(AB_SYSCALL_RETADDR_CORRUPT, 0, 0, std::ptr::null());
+            }
+            if elapsed > 100_000 {
+                RaiseException(AB_SYSCALL_TIME_EXCEEDED, 0, 0, std::ptr::null());
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn ab_callback(state: *const SyscallState) {
+    if state.is_null() {
+        return;
+    }
+
+    let state = &*state;
     let end_time = get_rdtsc();
     let elapsed = end_time - state.start_time;
     let current_stack_ptr = sp();
     let current_ret_addr = ret_addr();
 
     if current_stack_ptr != state.stack_ptr {
-        panic!("ACTIVEBREACH_SYSCALL_STACKPTRMODIFIED");
+        RaiseException(AB_SYSCALL_STACK_CORRUPT, 0, 0, std::ptr::null());
     }
     if current_ret_addr != state.ret_addr {
-        panic!("ACTIVEBREACH_SYSCALL_RETURNMODIFIED");
+        RaiseException(AB_SYSCALL_RETADDR_CORRUPT, 0, 0, std::ptr::null());
     }
-    const SYSCALL_TIME_THRESHOLD: u64 = 100000;
-    if elapsed > SYSCALL_TIME_THRESHOLD {
-        panic!("ACTIVEBREACH_SYSCALL_LONGSYSCALL");
+    if elapsed > 100_000 {
+        RaiseException(AB_SYSCALL_TIME_EXCEEDED, 0, 0, std::ptr::null());
     }
 }

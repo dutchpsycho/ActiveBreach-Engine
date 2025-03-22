@@ -12,7 +12,11 @@ This project is powered by **ActiveBreach**, a dedicated syscall execution we bu
 - Uses a **dispatcher model** to invoke syscalls without routing through user-mode APIs
 - Leverages a **callback** to prevent debugging.
 
-For a deeper technical breakdown on why, see > [TECH.md](TECH.md).  
+For a technical breakdown on how hooks work, see > [TECH.md](TECH.md).
+
+### Why did I make this?
+
+When approaching a guarded or monitored system, the usual move is to unhook everything aggressive method that’s easily detected in various ways. Sure, sophisticated techniques exist. But they often introduce unnecessary complexity and risk, leaving gaps for detection. I've taken a different approach, enter Syscall Proxy.
 
 <br>
 
