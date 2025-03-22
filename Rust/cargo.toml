@@ -3,7 +3,7 @@ name = "ActiveBreach"
 version = "0.1.0"
 edition = "2021"
 license = "CC-BY-NC-4.0"
-repository = "https://github.com/crisisevasion/syscall-proxy"
+repository = "https://github.com/DutchPsycho/Syscall-Proxy"
 
 [dependencies]
 lazy_static = "1.5.0"
