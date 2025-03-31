@@ -12,11 +12,13 @@ This project is powered by **ActiveBreach**, a dedicated syscall execution we bu
 - Uses a **dispatcher model** to invoke syscalls without routing through user-mode APIs
 - Leverages a **callback** to prevent debugging.
 
+I put a lot more effort into the rust version of this project. It supports memory encryption through an internal algo, leverages it's own TLS callback and uses an MT model. If you haven't used rust before, I'd reccomend trying.
+
 For a technical breakdown on how hooks work, see > [TECH.md](TECH.md).
 
 ### Why did I make this?
 
-When approaching a guarded or monitored system, the usual move is to unhook everything aggressive method that’s easily detected in various ways. Sure, sophisticated techniques exist. But they often introduce unnecessary complexity and risk, leaving gaps for detection. I've taken a different approach, enter Syscall Proxy.
+I've seen so many implementations and frameworks where the consensus is "Lets unhook everything globally in usermode andd risk getting detected by thousands of measures!". These projects aren't inherently bad, I just think there's a less aggressive and smarter way of doing it. Enter Syscall-Proxy
 
 <br>
 
@@ -29,6 +31,8 @@ When approaching a guarded or monitored system, the usual move is to unhook ever
 | **Global hooks on `ntdll.dll`**                 | Reads `ntdll.dll` directly into buffer, bypassing any API's monitoring lib loading.    |
 | **Remote process `ntdll.dll` hooks**            | Uses internal ActiveBreach dispatcher instead of calling hooked `ntdll.dll` directly.  |
 | **Partial YARA/CADA evasion**                   | Minimizes `ntdll.dll` presence in memory by zeroing out portions.                      |
+
+The rust version fully bypasses YARA/CADA evasion unless scanned during syscall execution due to page encryption.
 
 ---
 
