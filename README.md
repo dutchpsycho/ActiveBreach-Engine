@@ -77,13 +77,10 @@ User Process
     ▼ 
   Return
 ```
+
 <br>
 
 # **Using ActiveBreach (C & C++)**
-
----
-
-## ActiveBreach Usage
 
 ### 1. Include the Appropriate Header
 - **C++ Projects:**  
@@ -125,6 +122,59 @@ status = ab_call(NtQuerySystemInformation_t, "NtQuerySystemInformation", infoCla
 ### 4. Cleanup
 No manual cleanup is needed—resources are automatically released at program exit.
 
+yesss okay this is gonna look clean af 😮‍💨 here's a markdown-style section u can tack onto ur docs for the **Rust** version of `ActiveBreach`—same aesthetic, same structure as the C/C++ ones so it keeps that surgical, “this is a tool not a toy” energy:
+
+<br>
+
+# Using ActiveBreach (Rust)
+
+### 1. Add to Cargo Project
+Add **ActiveBreach** as a dependency in your `Cargo.toml`:
+
+```toml
+[dependencies]
+activebreach = { path = "path/to/activebreach" }
+```
+
+Then include the crate in your main file:
+
+```rust
+use activebreach::{activebreach_launch, ab_call};
+```
+
+---
+
+### 2. Initialize ActiveBreach
+Before making any syscalls, call the initialization function:
+
+```rust
+activebreach_launch();
+```
+
+This:
+- Maps a local `ntdll.dll`
+- Extracts syscall numbers
+- Builds syscall stubs
+- Launches a dispatcher thread
+
+---
+
+### 3. Making a System Call
+Use `ab_call()` to dynamically proxy a syscall. Supply:
+- The syscall name (`&str`)
+- A slice of up to 16 `usize` arguments
+
+```rust
+let ret = ab_call("NtProtectVirtualMemory", &[proc_handle, base_addr, region_size, protect]);
+```
+
+This sends the call to the dispatcher, which ROP-chains through a legitimate gadget inside `ntdll.dll`.
+
+---
+
+### 4. Cleanup
+No explicit cleanup is required. All memory is zeroed and freed, and resources are released on process termination.
+
 <br>
 
 ## Requirements:
@@ -146,13 +196,13 @@ You are free to:
 ✔ **Adapt** — Modify and build upon it.  
 
 **However:**  
-❌ **No Commercial Use** — This software cannot be used in for-profit applications.  
-✔ **Attribution Required** — You must credit **TITAN Softwork Solutions** as the original creator.  
-✏ **Modifications Must Be Documented** — If you make changes, you must state what was modified.  
+**No Commercial Use** — This software cannot be used in for-profit applications.  
+**Attribution Required** — You must credit **TITAN Softwork Solutions** as the original creator.  
+**Modifications Must Be Documented** — If you make changes, you must state what was modified.  
 
 Full License: [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)
 
 <br>
 
 ## Disclaimer
-We am not responsible for anything done with this code. It is provided under public domain and is free-use, what users do with this falls under their personal obligations. I do not condone unethical use of this project, you are liable for your own actions.
+I am not responsible for anything done with this code. It is provided under public domain and is free-use, what users do with this falls under their personal obligations. I do not condone unethical use of this project, you are liable for your own actions.

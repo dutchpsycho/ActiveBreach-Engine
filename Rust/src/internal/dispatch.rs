@@ -19,7 +19,7 @@ use crate::internal::stub::{G_STUB_POOL, StubPool};
 pub struct ABCallRequest {
     pub syscall_name: [u8; 64],
     pub arg_count: usize,
-    pub args: [usize; 8],
+    pub args: [usize; 16], // updated from 8 to 16
     pub ret: usize,
     pub complete: winapi::shared::ntdef::HANDLE,
 }
@@ -29,7 +29,7 @@ impl Default for ABCallRequest {
         Self {
             syscall_name: [0u8; 64],
             arg_count: 0,
-            args: [0; 8],
+            args: [0; 16], // updated from 8 to 16
             ret: 0,
             complete: null_mut(),
         }
@@ -49,7 +49,9 @@ pub static G_AB_READY: AtomicBool = AtomicBool::new(false);
 pub static mut G_AB_CALL_EVENT: winapi::shared::ntdef::HANDLE = null_mut();
 pub static mut G_AB_INITIALIZED_EVENT: winapi::shared::ntdef::HANDLE = null_mut();
 
+// updated function pointer type to support 16 parameters
 pub type ABStubFn = unsafe extern "system" fn(
+    usize, usize, usize, usize, usize, usize, usize, usize,
     usize, usize, usize, usize, usize, usize, usize, usize
 ) -> usize;
 
@@ -59,7 +61,6 @@ pub unsafe extern "system" fn dispatcher(_lp: *mut c_void) -> DWORD {
     }
 
     loop {
-
         if WaitForSingleObject(G_AB_CALL_EVENT, INFINITE) != 0 {
             fatal_err("dispatcher: wait failed");
         }
@@ -83,7 +84,6 @@ pub unsafe extern "system" fn dispatcher(_lp: *mut c_void) -> DWORD {
         };
 
         let stub = {
-
             let mut pool = G_STUB_POOL.lock().unwrap();
             let stub = pool.acquire().unwrap_or_else(|| fatal_err("dispatcher: no available stub"));
 
@@ -105,11 +105,9 @@ pub unsafe extern "system" fn dispatcher(_lp: *mut c_void) -> DWORD {
         };
 
         let ssn_ptr = stub.add(4) as *mut u32;
-        
         if ssn_ptr.is_null() {
             fatal_err("dispatcher: invalid SSN injection address");
         }
-
         ssn_ptr.write_volatile(ssn);
 
         let fn_ptr: ABStubFn = match std::panic::catch_unwind(|| transmute::<*mut u8, ABStubFn>(stub)) {
@@ -118,15 +116,32 @@ pub unsafe extern "system" fn dispatcher(_lp: *mut c_void) -> DWORD {
         };
 
         let ret = match req.arg_count {
-            0 => fn_ptr(0, 0, 0, 0, 0, 0, 0, 0),
-            1 => fn_ptr(req.args[0], 0, 0, 0, 0, 0, 0, 0),
-            2 => fn_ptr(req.args[0], req.args[1], 0, 0, 0, 0, 0, 0),
-            3 => fn_ptr(req.args[0], req.args[1], req.args[2], 0, 0, 0, 0, 0),
-            4 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], 0, 0, 0, 0),
-            5 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], 0, 0, 0),
-            6 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], 0, 0),
-            7 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], 0),
-            8 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7]),
+            0 => fn_ptr(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            1 => fn_ptr(req.args[0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            2 => fn_ptr(req.args[0], req.args[1], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            3 => fn_ptr(req.args[0], req.args[1], req.args[2], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            4 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            5 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            6 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            7 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            8 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
+                      0, 0, 0, 0, 0, 0, 0, 0),
+            9 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
+                      req.args[8], 0, 0, 0, 0, 0, 0, 0),
+            10 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
+                       req.args[8], req.args[9], 0, 0, 0, 0, 0, 0),
+            11 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
+                       req.args[8], req.args[9], req.args[10], 0, 0, 0, 0, 0),
+            12 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
+                       req.args[8], req.args[9], req.args[10], req.args[11], 0, 0, 0, 0),
+            13 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
+                       req.args[8], req.args[9], req.args[10], req.args[11], req.args[12], 0, 0, 0),
+            14 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
+                       req.args[8], req.args[9], req.args[10], req.args[11], req.args[12], req.args[13], 0, 0),
+            15 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
+                       req.args[8], req.args[9], req.args[10], req.args[11], req.args[12], req.args[13], req.args[14], 0),
+            16 => fn_ptr(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
+                       req.args[8], req.args[9], req.args[10], req.args[11], req.args[12], req.args[13], req.args[14], req.args[15]),
             _ => fatal_err("dispatcher: invalid argument count"),
         };
 

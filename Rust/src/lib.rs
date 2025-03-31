@@ -10,8 +10,8 @@
 *  Description:
 *      ActiveBreach is a syscall abstraction layer that dynamically proxies syscalls
 *      by extracting system service numbers (SSNs) from ntdll.dll and locating valid
-*      syscall prologue gadgets from within the hooked ntdll. When a call is made via
-*      the dispatcher, the call is ROP-chained through the located gadget, so that
+*      syscall prologue gadgets from within the hooked ntdll. When a ab_call is made via
+*      the dispatcher, the ab_call is ROP-chained through the located gadget, so that
 *      the syscall appears to originate from ntdll.
 *
 *  License:      Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
@@ -36,96 +36,61 @@
 
 mod internal;
 
+use std::ffi::CString;
 use std::ptr::{null, null_mut};
-use std::ffi::{c_void, CStr};
-use std::os::raw::c_char;
 
 use winapi::um::handleapi::CloseHandle;
 use winapi::um::synchapi::{WaitForSingleObject, CreateEventA, SetEvent};
 use winapi::um::winbase::INFINITE;
 use winapi::um::processthreadsapi::CreateThread;
 
-#[link_section = ".CRT$XLU"]
-#[used]
-static TLS_CALLBACK: extern "system" fn(*mut c_void, u32, *mut c_void) = tls_callback;
+/// Launch the ActiveBreach subsystem — loads NTDLL, extracts syscalls, spins dispatcher.
+pub fn activebreach_launch() {
+    unsafe {
+        let mut ab_handle_size: usize = 0;
 
-extern "system" fn tls_callback(_hModule: *mut c_void, reason: u32, _reserved: *mut c_void) {
-    if reason == winapi::um::winnt::DLL_PROCESS_ATTACH {
-        unsafe {
-            CreateThread(
-                null_mut(),
-                0,
-                Some(tls_launch_shim),
-                null_mut(),
-                0,
-                null_mut(),
-            );
+        let mapped_base = internal::file_buffer::buffer(&mut ab_handle_size);
+        internal::exports::extract_syscalls(mapped_base as *const u8, ab_handle_size);
+
+        let hThread = CreateThread(
+            null_mut(),
+            0,
+            Some(internal::dispatch::thread_proc),
+            null_mut(),
+            0,
+            null_mut(),
+        );
+
+        if hThread.is_null() {
+            internal::err::fatal_err("failed to create dispatcher thread");
         }
+
+        internal::file_buffer::zero_and_free(mapped_base as *mut _, ab_handle_size);
+        CloseHandle(hThread);
     }
 }
 
-unsafe extern "system" fn tls_launch_shim(_: *mut winapi::ctypes::c_void) -> u32 {
-    ActiveBreach_launch();
-    0
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn ActiveBreach_launch() {
-    let mut ab_handle_size: usize = 0;
-
-    let mapped_base = internal::file_buffer::buffer(&mut ab_handle_size);
-
-    internal::exports::extract_syscalls(mapped_base as *const u8, ab_handle_size);
-
-    let hThread = CreateThread(
-        null_mut(),
-        0,
-        Some(internal::dispatch::thread_proc),
-        null_mut(),
-        0,
-        null_mut(),
-    );
-
-    if hThread.is_null() {
-        internal::err::fatal_err("failed to create dispatcher thread");
+/// Perform a syscall by name + argument list
+///
+/// Example:
+/// ```rust
+/// let ret = activebreach::ab_call("NtProtectVirtualMemory", &[arg1, arg2, arg3]);
+/// ```
+pub fn ab_call(syscall_name: &str, args: &[usize]) -> usize {
+    if args.len() > 16 {
+        panic!("too many syscall arguments");
     }
-
-    internal::file_buffer::zero_and_free(mapped_base as *mut _, ab_handle_size);
-
-    CloseHandle(hThread);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn ab_call(syscall_name: *const u8, args: *const usize, arg_count: usize) -> usize {
-    if syscall_name.is_null() {
-        panic!("ab_call: syscall name is null");
-    }
-
-    if arg_count > 8 {
-        panic!("ab_call: too many arguments");
-    }
-
-    if args.is_null() {
-        panic!("ab_call: args is null");
-    }
-
-    let name = match CStr::from_ptr(syscall_name as *const c_char).to_str() {
-        Ok(s) => s,
-        Err(_) => panic!("ab_call: invalid syscall name"),
-    };
 
     let found = internal::exports::SYSCALL_TABLE
         .get()
-        .map_or(false, |tbl| tbl.contains_key(name));
+        .map_or(false, |tbl| tbl.contains_key(syscall_name));
 
     if !found {
-        panic!("ab_call: syscall '{}' not found", name);
+        panic!("ab_call: syscall '{}' not found", syscall_name);
     }
 
-    let args_slice = std::slice::from_raw_parts(args, arg_count);
-
     let mut syscall_name_buf = [0u8; 64];
-    let name_bytes = name.as_bytes();
+    let name_bytes = syscall_name.as_bytes();
 
     if name_bytes.len() >= 64 {
         panic!("ab_call: syscall name too long");
@@ -135,25 +100,27 @@ pub unsafe extern "C" fn ab_call(syscall_name: *const u8, args: *const usize, ar
 
     let mut req = internal::dispatch::ABCallRequest {
         syscall_name: syscall_name_buf,
-        arg_count,
-        args: [0; 8],
+        arg_count: args.len(),
+        args: [0; 16],
         ret: 0,
-        complete: CreateEventA(null_mut(), 1, 0, null()),
+        complete: unsafe {
+            CreateEventA(null_mut(), 1, 0, null())
+        },
     };
 
-    req.args[..arg_count].copy_from_slice(args_slice);
+    req.args[..args.len()].copy_from_slice(args);
 
     {
         let mut guard = internal::dispatch::G_AB_CALL_REQUEST.lock().unwrap();
         *guard = req.clone();
     }
 
-    SetEvent(internal::dispatch::G_AB_CALL_EVENT);
-
-    WaitForSingleObject(req.complete, INFINITE);
-    CloseHandle(req.complete);
+    unsafe {
+        SetEvent(internal::dispatch::G_AB_CALL_EVENT);
+        WaitForSingleObject(req.complete, INFINITE);
+        CloseHandle(req.complete);
+    }
 
     let guard = internal::dispatch::G_AB_CALL_REQUEST.lock().unwrap();
-
     guard.ret
 }
