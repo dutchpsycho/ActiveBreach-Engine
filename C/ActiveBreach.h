@@ -1,4 +1,33 @@
-﻿#pragma warning(disable : 4311)
+﻿/*
+ * ==================================================================================
+ *  Repository:   Syscall Proxy
+ *  Project:      ActiveBreach
+ *  File:         ActiveBreach.h
+ *  Author:       DutchPsycho
+ *  Organization: TITAN Softwork Solutions
+ *  Inspired by:  MDSEC Research
+ *
+ *  Description:
+ *      ActiveBreach is a syscall abstraction layer that dynamically proxies syscalls
+ *      by extracting system service numbers (SSNs) from ntdll.dll and constructing hashed
+ *      syscall stubs for indirect execution.
+ *
+ *  License:      Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
+ *  Copyright:    (C) 2025 TITAN Softwork Solutions. All rights reserved.
+ *
+ *  Licensing Terms:
+ *  ----------------------------------------------------------------------------------
+ *   - You are free to use, modify, and share this software.
+ *   - Commercial use is strictly prohibited.
+ *   - Proper credit must be given to TITAN Softwork Solutions.
+ *   - Modifications must be clearly documented.
+ *   - This software is provided "as-is" without warranties of any kind.
+ *
+ *  Full License: https://creativecommons.org/licenses/by-nc/4.0/
+ * ==================================================================================
+ */
+
+#pragma warning(disable : 4311)
 #pragma warning(disable : 4302)
 
 #ifndef ACTIVEBREACH_H
@@ -70,8 +99,7 @@ extern "C" {
     } ActiveBreach;
 
     extern ActiveBreach g_ab;
-
-    // 🔐 Hash resolver (custom-modified FNV-1)
+    
     uint64_t ab_hash(const char* str);
 
     void* _Buffer(size_t* out_size);
