@@ -24,6 +24,7 @@
     <ProjectGuid>{f2e58c30-ff76-4720-b7d7-1321a2e2e60c}</ProjectGuid>
     <RootNamespace>Tests</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <ProjectName>C Tests</ProjectName>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -70,6 +71,10 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <IntDir>$(SolutionDir)Junk\Int\$(ProjectName)_$(Configuration)_$(Platform)\</IntDir>
+    <TargetName>ActiveBreach_C_TEST</TargetName>
+  </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -133,10 +138,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="..\Include\ActiveBreach.h" />
     <ClInclude Include="Infra.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\C\ActiveBreach.c" />
+    <ClCompile Include="..\Include\ActiveBreach.c" />
     <ClCompile Include="Container\AbThunk.c" />
     <ClCompile Include="Container\Memory.c" />
     <ClCompile Include="Container\SysInfo.cpp" />

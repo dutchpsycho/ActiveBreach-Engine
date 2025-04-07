@@ -67,59 +67,59 @@ extern "C" {
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
 #define SYSCALL_TIME_THRESHOLD      50000000ULL
 
-    extern volatile bool g_ab_initialized;
-    extern HANDLE g_abInitializedEvent;
+extern volatile bool g_ab_initialized;
+extern HANDLE g_abInitializedEvent;
 
-    typedef struct {
-        char* name;
-        uint32_t ssn;
-    } SyscallEntry;
+typedef struct {
+    char* name;
+    uint32_t ssn;
+} SyscallEntry;
 
-    typedef struct {
-        SyscallEntry* entries;
-        size_t count;
-    } SyscallTable;
+typedef struct {
+    SyscallEntry* entries;
+    size_t count;
+} SyscallTable;
 
-    typedef struct _SyscallState {
-        uint64_t start_time;
-        void* stack_ptr;
-        void* ret_addr;
-    } SyscallState;
+typedef struct _SyscallState {
+    uint64_t start_time;
+    void* stack_ptr;
+    void* ret_addr;
+} SyscallState;
 
-    typedef struct {
-        uint64_t hash;
-        void* stub;
-    } StubEntry;
+typedef struct {
+    uint64_t hash;
+    void* stub;
+} StubEntry;
 
-    typedef struct {
-        uint8_t* stub_mem;
-        size_t stub_mem_size;
-        StubEntry* stubs;
-        size_t stub_count;
-    } ActiveBreach;
+typedef struct {
+    uint8_t* stub_mem;
+    size_t stub_mem_size;
+    StubEntry* stubs;
+    size_t stub_count;
+} ActiveBreach;
 
-    extern ActiveBreach g_ab;
+extern ActiveBreach g_ab;
     
-    uint64_t ab_hash(const char* str);
+uint64_t ab_hash(const char* str);
 
-    void* _Buffer(size_t* out_size);
-    SyscallTable _GetSyscallTable(void* mapped_base);
-    void _Cleanup(void* mapped_base);
+void* _Buffer(size_t* out_size);
+SyscallTable _GetSyscallTable(void* mapped_base);
+void _Cleanup(void* mapped_base);
 
-    void _ActiveBreach_Init(ActiveBreach* ab);
-    int  _ActiveBreach_AllocStubs(ActiveBreach* ab, const SyscallTable* table);
-    void* _ActiveBreach_GetStub(ActiveBreach* ab, const char* name);
-    void _ActiveBreach_Free(ActiveBreach* ab);
-    void _ActiveBreach_Cleanup(void);
-    void ActiveBreach_launch(void);
+void _ActiveBreach_Init(ActiveBreach* ab);
+int  _ActiveBreach_AllocStubs(ActiveBreach* ab, const SyscallTable* table);
+void* _ActiveBreach_GetStub(ActiveBreach* ab, const char* name);
+void _ActiveBreach_Free(ActiveBreach* ab);
+void _ActiveBreach_Cleanup(void);
+void ActiveBreach_launch(void);
 
-    ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...);
-    ULONG_PTR ab_call_func(const char* name, size_t arg_count, ...);
+ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...);
+ULONG_PTR ab_call_func(const char* name, size_t arg_count, ...);
 
-    ULONG_PTR NTAPI NoOpStub(ULONG_PTR a, ULONG_PTR b, ULONG_PTR c, ULONG_PTR d,
-        ULONG_PTR e, ULONG_PTR f, ULONG_PTR g, ULONG_PTR h,
-        ULONG_PTR i, ULONG_PTR j, ULONG_PTR k, ULONG_PTR l,
-        ULONG_PTR m, ULONG_PTR n, ULONG_PTR o, ULONG_PTR p);
+ULONG_PTR NTAPI NoOpStub(ULONG_PTR a, ULONG_PTR b, ULONG_PTR c, ULONG_PTR d,
+    ULONG_PTR e, ULONG_PTR f, ULONG_PTR g, ULONG_PTR h,
+    ULONG_PTR i, ULONG_PTR j, ULONG_PTR k, ULONG_PTR l,
+    ULONG_PTR m, ULONG_PTR n, ULONG_PTR o, ULONG_PTR p);
 
     /* --- Macro Helpers to count args --- */
 #define PP_NARG(...)  PP_NARG_(__VA_ARGS__, PP_RSEQ_N())
@@ -146,15 +146,15 @@ inline auto ab_call_cpp(const char* name, Args... args)
 }
 #define ab_call(nt_type, name, ...) ab_call_cpp<nt_type>(name, __VA_ARGS__)
 #else
-#define ab_call(nt_type, name, result, ...) do {                             \
-    if (!g_ab_initialized) {                                                 \
-        fprintf(stderr, "Error: ActiveBreach is not initialized.\n");       \
-        result = (nt_type)NoOpStub;                                          \
-    } else {                                                                 \
-        void* _stub = _ActiveBreach_GetStub(&g_ab, (name));                  \
-        result = ((nt_type)_ActiveBreach_Call(_stub, PP_NARG(__VA_ARGS__),  \
-                    (ULONG_PTR)__VA_ARGS__));                                \
-    }                                                                        \
+#define ab_call(nt_type, name, result, ...) do {                                  \
+    if (!g_ab_initialized) {                                                      \
+        fprintf(stderr, "Error: ActiveBreach is not initialized.\n");            \
+        result = (nt_type)NoOpStub;                                               \
+    } else {                                                                      \
+        void* _stub = _ActiveBreach_GetStub(&g_ab, (name));                       \
+        result = ((nt_type)_ActiveBreach_Call(_stub, PP_NARG(__VA_ARGS__),       \
+            __VA_ARGS__));                                                        \
+    }                                                                             \
 } while(0)
 #endif
 

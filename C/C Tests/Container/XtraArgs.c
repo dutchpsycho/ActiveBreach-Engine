@@ -40,7 +40,7 @@ NTSTATUS test_extended_syscall() {
     ULONG retLen = 0;
     HANDLE hThread = GetCurrentThread();
 
-    NTSTATUS status = (NTSTATUS)ab_call_fn(
+    NTSTATUS status = (NTSTATUS)ab_call_func(
         "NtQueryInformationThread", 5,
         hThread,  // ThreadHandle
         ThreadBasicInformation,  // ThreadInformationClass

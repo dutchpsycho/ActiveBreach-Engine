@@ -11,12 +11,12 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="ActiveBreach.h">
+    <ClInclude Include="Include\ActiveBreach.h">
       <Filter>Include</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="ActiveBreach.c">
+    <ClCompile Include="Include\ActiveBreach.c">
       <Filter>Core</Filter>
     </ClCompile>
   </ItemGroup>

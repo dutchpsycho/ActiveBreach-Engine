@@ -2,8 +2,8 @@
 #define INFRA_H
 
 #include <windows.h>
-#include <winternl.h>
-#include "../C/ActiveBreach.h"
+
+#include "../Include/ActiveBreach.h"
 
 #ifndef STATUS_UNSUCCESSFUL
 #define STATUS_UNSUCCESSFUL ((NTSTATUS)0xC0000001L)

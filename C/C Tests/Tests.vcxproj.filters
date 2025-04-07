@@ -4,40 +4,43 @@
     <Filter Include="Include">
       <UniqueIdentifier>{39d78d80-01e5-4771-a184-c6fb7acd6ede}</UniqueIdentifier>
     </Filter>
-    <Filter Include="Src">
+    <Filter Include="Core">
       <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
       <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
     </Filter>
-    <Filter Include="Src\Container">
+    <Filter Include="Core\Modules">
       <UniqueIdentifier>{a125a77d-0092-4f70-9bd7-8a4da9fda151}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Main.cpp">
-      <Filter>Src</Filter>
+      <Filter>Core</Filter>
     </ClCompile>
     <ClCompile Include="Container\SysInfo.cpp">
-      <Filter>Src\Container</Filter>
+      <Filter>Core\Modules</Filter>
     </ClCompile>
     <ClCompile Include="Container\Threading.cpp">
-      <Filter>Src\Container</Filter>
+      <Filter>Core\Modules</Filter>
     </ClCompile>
     <ClCompile Include="Container\Mem.cpp">
-      <Filter>Src\Container</Filter>
-    </ClCompile>
-    <ClCompile Include="..\C\ActiveBreach.c">
-      <Filter>Include</Filter>
+      <Filter>Core\Modules</Filter>
     </ClCompile>
     <ClCompile Include="Container\Memory.c">
-      <Filter>Src\Container</Filter>
+      <Filter>Core\Modules</Filter>
     </ClCompile>
     <ClCompile Include="Container\AbThunk.c">
-      <Filter>Src\Container</Filter>
+      <Filter>Core\Modules</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Include\ActiveBreach.c">
+      <Filter>Include</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Infra.h">
-      <Filter>Src</Filter>
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Include\ActiveBreach.h">
+      <Filter>Include</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>
