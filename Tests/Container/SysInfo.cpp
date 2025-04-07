@@ -23,17 +23,15 @@ NTSTATUS test_sysinfo() {
             infoClass, buffer, bufferSize, &returnLength);
 
         if (status == STATUS_SUCCESS) {
-            std::printf("[+] NtQuerySystemInformation succeeded, return length: %lu\n", returnLength);
+            std::printf("[OK] NtQuerySystemInformation succeeded, return length: %lu\n", returnLength);
             VirtualFree(buffer, 0, MEM_RELEASE);
             return STATUS_SUCCESS;
         }
-
         else if (status == STATUS_INFO_LENGTH_MISMATCH) {
             VirtualFree(buffer, 0, MEM_RELEASE);
             bufferSize *= 2;
             continue;
         }
-
         else {
             std::fprintf(stderr, "[-] NtQuerySystemInformation failed with status: 0x%lx\n", status);
             VirtualFree(buffer, 0, MEM_RELEASE);

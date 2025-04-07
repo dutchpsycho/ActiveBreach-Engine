@@ -20,9 +20,4 @@
       <Filter>Core</Filter>
     </ClCompile>
   </ItemGroup>
-  <ItemGroup>
-    <None Include="Stub.asm">
-      <Filter>Core</Filter>
-    </None>
-  </ItemGroup>
 </Project>

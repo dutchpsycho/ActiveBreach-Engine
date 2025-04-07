@@ -22,11 +22,17 @@
     <ClCompile Include="Container\Threading.cpp">
       <Filter>Src\Container</Filter>
     </ClCompile>
-    <ClCompile Include="Container\Memory.cpp">
+    <ClCompile Include="Container\Mem.cpp">
       <Filter>Src\Container</Filter>
     </ClCompile>
     <ClCompile Include="..\C\ActiveBreach.c">
       <Filter>Include</Filter>
+    </ClCompile>
+    <ClCompile Include="Container\Memory.c">
+      <Filter>Src\Container</Filter>
+    </ClCompile>
+    <ClCompile Include="Container\AbThunk.c">
+      <Filter>Src\Container</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

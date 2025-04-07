@@ -35,6 +35,7 @@ extern "C" {
 #endif
 
 #pragma warning(disable : 28251)
+
 #include <Windows.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -90,4 +91,18 @@ struct _SyscallState {
         return reinterpret_cast<nt_type>(stub); \
     }())(__VA_ARGS__)
 
+#endif
+
+#ifdef __cplusplus
+extern "C" ULONG_PTR ab_call_fn(const char* name, size_t arg_count, ...);
+
+template<typename Ret = ULONG_PTR, typename... Args>
+Ret ab_call_fn_cpp(const char* name, Args... args) {
+    void* stub = _ab_get_stub(name);
+    if (!stub) {
+        fprintf(stderr, "ab_call_fn_cpp: stub for \"%s\" not found\n", name);
+        return (Ret)0;
+    }
+    return (Ret)ab_call_fn(name, sizeof...(args), (ULONG_PTR)args...);
+}
 #endif

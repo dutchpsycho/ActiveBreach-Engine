@@ -137,9 +137,11 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\C\ActiveBreach.c" />
+    <ClCompile Include="Container\AbThunk.c" />
+    <ClCompile Include="Container\Memory.c" />
     <ClCompile Include="Container\SysInfo.cpp" />
     <ClCompile Include="Container\Threading.cpp" />
-    <ClCompile Include="Container\Memory.cpp" />
+    <ClCompile Include="Container\Mem.cpp" />
     <ClCompile Include="Main.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

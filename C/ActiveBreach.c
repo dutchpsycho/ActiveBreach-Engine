@@ -28,12 +28,17 @@
  */
 
 #include "ActiveBreach.h"
+
 #include <windows.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <intrin.h>
+
+#include <immintrin.h>
+#include <intrin.h>  
 
 #ifdef _MSC_VER
 #define NORETURN __declspec(noreturn)
@@ -48,6 +53,46 @@ HANDLE g_abInitializedEvent = NULL;
 static NORETURN void fatal_err(const char* msg) {
     fprintf(stderr, "%s\n", msg);
     exit(1);
+}
+
+static int has_avx2(void) {
+    int info[4];
+    __cpuid(info, 0);
+    if (info[0] >= 7) {
+        __cpuidex(info, 7, 0);
+        return (info[1] & (1 << 5)) != 0;
+    }
+    return 0;
+}
+
+uint64_t ab_hash(const char* str) {
+    size_t len = strlen(str);
+    uint64_t seed = 0xDEADC0DECAFEBEEF;
+
+    if (has_avx2() && len >= 32) {
+        __m256i acc = _mm256_set1_epi64x(seed);
+        for (size_t i = 0; i + 32 <= len; i += 32) {
+            __m256i chunk = _mm256_loadu_si256((const __m256i*)(str + i));
+            __m256i shuffled = _mm256_shuffle_epi8(chunk, _mm256_set1_epi8(0x1B));
+            acc = _mm256_xor_si256(acc, chunk);
+            acc = _mm256_add_epi64(acc, shuffled);
+            acc = _mm256_or_si256(acc, _mm256_slli_epi64(acc, 5));
+            acc = _mm256_sub_epi64(acc, _mm256_srli_epi64(acc, 3));
+        }
+
+        uint64_t h[4];
+        _mm256_storeu_si256((__m256i*)h, acc);
+        return h[0] ^ h[1] ^ h[2] ^ h[3] ^ seed;
+    }
+
+    uint64_t hash = seed;
+    while (*str) {
+        hash ^= (uint8_t)(*str++);
+        hash = (hash << 5) | (hash >> (64 - 5));
+        hash += 0x1337BEEF;
+    }
+
+    return hash;
 }
 
 void _Zero(void* buffer, size_t size) {
@@ -161,9 +206,11 @@ SyscallTable _GetSyscallTable(void* mapped_base) {
                 func_ptr[2] == 0xD1 && func_ptr[3] == 0xB8)
             {
                 uint32_t ssn = *(uint32_t*)(func_ptr + 4);
+
                 entries[count].name = strdup(func_name);
                 if (!entries[count].name)
                     fatal_err("Failed to duplicate function name");
+
                 entries[count].ssn = ssn;
                 count++;
             }
@@ -224,7 +271,7 @@ int _ActiveBreach_AllocStubs(ActiveBreach* ab, const SyscallTable* table) {
     if (table->count == 0)
         return -1;
 
-    ab->stub_mem_size = table->count * 16; // 16 bytes per stub
+    ab->stub_mem_size = table->count * 16;
     ab->stub_mem = (uint8_t*)VirtualAlloc(NULL, ab->stub_mem_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (!ab->stub_mem)
         fatal_err("Failed to allocate executable memory for stubs");
@@ -240,10 +287,11 @@ int _ActiveBreach_AllocStubs(ActiveBreach* ab, const SyscallTable* table) {
 
     for (size_t i = 0; i < table->count; i++) {
         CreateStub(current_stub, table->entries[i].ssn);
-        ab->stubs[i].name = strdup(table->entries[i].name);
-        if (!ab->stubs[i].name)
-            fatal_err("Failed to duplicate stub name");
+
+        uint64_t hash = ab_hash(table->entries[i].name);
+        ab->stubs[i].hash = hash;
         ab->stubs[i].stub = current_stub;
+
         current_stub += 16;
     }
 
@@ -251,22 +299,16 @@ int _ActiveBreach_AllocStubs(ActiveBreach* ab, const SyscallTable* table) {
 }
 
 void* _ActiveBreach_GetStub(ActiveBreach* ab, const char* name) {
-    if (!g_ab_initialized) {
-        fprintf(stderr, "Error: ActiveBreach is not initialized.\n");
+    if (!g_ab_initialized || !ab || !ab->stubs)
         return (void*)NoOpStub;
-    }
 
-    if (!ab || !ab->stubs) {
-        fprintf(stderr, "Runtime Error: ActiveBreach instance is invalid.\n");
-        return (void*)NoOpStub;
-    }
+    uint64_t hash = ab_hash(name);
 
     for (size_t i = 0; i < ab->stub_count; i++) {
-        if (strcmp(ab->stubs[i].name, name) == 0)
+        if (ab->stubs[i].hash == hash)
             return ab->stubs[i].stub;
     }
 
-    fprintf(stderr, "Runtime Error: Stub '%s' not found in ActiveBreach.\n", name);
     return (void*)NoOpStub;
 }
 
@@ -280,10 +322,6 @@ void _ActiveBreach_Free(ActiveBreach* ab) {
     }
 
     if (ab->stubs) {
-        for (size_t i = 0; i < ab->stub_count; i++) {
-            if (ab->stubs[i].name)
-                free(ab->stubs[i].name);
-        }
         free(ab->stubs);
         ab->stubs = NULL;
     }
@@ -347,6 +385,7 @@ static DWORD WINAPI _ActiveBreach_Dispatcher(LPVOID lpParameter) {
         ULONG_PTR ret = 0;
 
         switch (req.arg_count) {
+
         case 0:  ret = fn(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); break;
         case 1:  ret = fn(req.args[0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); break;
         case 2:  ret = fn(req.args[0], req.args[1], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); break;
@@ -355,37 +394,16 @@ static DWORD WINAPI _ActiveBreach_Dispatcher(LPVOID lpParameter) {
         case 5:  ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); break;
         case 6:  ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0); break;
         case 7:  ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], 0, 0, 0, 0, 0, 0, 0, 0, 0); break;
-        case 8:  ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
-            req.args[4], req.args[5], req.args[6], req.args[7],
-            0, 0, 0, 0, 0, 0, 0, 0); break;
-        case 9:  ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
-            req.args[4], req.args[5], req.args[6], req.args[7],
-            req.args[8], 0, 0, 0, 0, 0, 0, 0); break;
-        case 10: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
-            req.args[4], req.args[5], req.args[6], req.args[7],
-            req.args[8], req.args[9], 0, 0, 0, 0, 0, 0); break;
-        case 11: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
-            req.args[4], req.args[5], req.args[6], req.args[7],
-            req.args[8], req.args[9], req.args[10], 0, 0, 0, 0, 0); break;
-        case 12: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
-            req.args[4], req.args[5], req.args[6], req.args[7],
-            req.args[8], req.args[9], req.args[10], req.args[11], 0, 0, 0, 0); break;
-        case 13: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
-            req.args[4], req.args[5], req.args[6], req.args[7],
-            req.args[8], req.args[9], req.args[10], req.args[11],
-            req.args[12], 0, 0, 0); break;
-        case 14: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
-            req.args[4], req.args[5], req.args[6], req.args[7],
-            req.args[8], req.args[9], req.args[10], req.args[11],
-            req.args[12], req.args[13], 0, 0); break;
-        case 15: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
-            req.args[4], req.args[5], req.args[6], req.args[7],
-            req.args[8], req.args[9], req.args[10], req.args[11],
-            req.args[12], req.args[13], req.args[14], 0); break;
-        case 16: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3],
-            req.args[4], req.args[5], req.args[6], req.args[7],
-            req.args[8], req.args[9], req.args[10], req.args[11],
-            req.args[12], req.args[13], req.args[14], req.args[15]); break;
+        case 8:  ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7], 0, 0, 0, 0, 0, 0, 0, 0); break;
+        case 9:  ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7], req.args[8], 0, 0, 0, 0, 0, 0, 0); break;
+        case 10: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7], req.args[8], req.args[9], 0, 0, 0, 0, 0, 0); break;
+        case 11: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7], req.args[8], req.args[9], req.args[10], 0, 0, 0, 0, 0); break;
+        case 12: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7], req.args[8], req.args[9], req.args[10], req.args[11], 0, 0, 0, 0); break;
+        case 13: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7], req.args[8], req.args[9], req.args[10], req.args[11], req.args[12], 0, 0, 0); break;
+        case 14: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7], req.args[8], req.args[9], req.args[10], req.args[11], req.args[12], req.args[13], 0, 0); break;
+        case 15: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7], req.args[8], req.args[9], req.args[10], req.args[11], req.args[12], req.args[13], req.args[14], 0); break;
+        case 16: ret = fn(req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7], req.args[8], req.args[9], req.args[10], req.args[11], req.args[12], req.args[13], req.args[14], req.args[15]); break;
+
         default:
             fatal_err("Invalid argument count in call dispatcher");
         }
@@ -503,4 +521,52 @@ ULONG_PTR NTAPI NoOpStub(ULONG_PTR a, ULONG_PTR b, ULONG_PTR c, ULONG_PTR d,
     ULONG_PTR m, ULONG_PTR n, ULONG_PTR o, ULONG_PTR p) {
     fprintf(stderr, "Warning: Called an uninitialized or missing stub in ActiveBreach!\n");
     return 0;
+}
+
+ULONG_PTR ab_call_func(const char* name, size_t arg_count, ...) {
+    if (!g_ab_initialized) {
+        fprintf(stderr, "Error: ActiveBreach not initialized. Cannot call '%s'.\n", name);
+        return (ULONG_PTR)NoOpStub;
+    }
+
+    void* stub = _ActiveBreach_GetStub(&g_ab, name);
+    if (!stub || stub == (void*)NoOpStub)
+        return (ULONG_PTR)NoOpStub;
+
+    va_list vl;
+    va_start(vl, arg_count);
+
+    ABCallRequest req = { 0 };
+    req.stub = stub;
+    req.arg_count = arg_count;
+
+    for (size_t i = 0; i < arg_count && i < 16; i++) {
+        req.args[i] = va_arg(vl, ULONG_PTR);
+    }
+
+    va_end(vl);
+
+    req.complete = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!req.complete)
+        fatal_err("ab_call_func: Failed to create completion event");
+
+    EnterCriticalSection(&g_abCallCS);
+    g_abCallRequest = req;
+    LeaveCriticalSection(&g_abCallCS);
+
+    SetEvent(g_abCallEvent);
+    WaitForSingleObject(req.complete, INFINITE);
+
+    EnterCriticalSection(&g_abCallCS);
+    ULONG_PTR ret = g_abCallRequest.ret;
+    LeaveCriticalSection(&g_abCallCS);
+    CloseHandle(req.complete);
+
+    SyscallState state;
+    state.start_time = __rdtsc();
+    state.stack_ptr = _AddressOfReturnAddress();
+    state.ret_addr = _ReturnAddress();
+    _ActiveBreach_Callback(&state);
+
+    return ret;
 }

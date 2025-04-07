@@ -4,10 +4,11 @@
 #include <cstdio>
 
 typedef NTSTATUS(NTAPI* NtCreateThreadEx_t)(
-    PHANDLE, ACCESS_MASK, PVOID, HANDLE, PVOID, PVOID, ULONG, SIZE_T, SIZE_T, SIZE_T, PVOID);
+    PHANDLE, ACCESS_MASK, PVOID, HANDLE, PVOID, PVOID, ULONG, SIZE_T, SIZE_T, SIZE_T, PVOID
+    );
 
 DWORD WINAPI DummyThread(LPVOID) {
-    std::printf("[+] Thread executed successfully.\n");
+    std::printf("[OK] Thread executed successfully.\n");
     return 0;
 }
 
@@ -21,7 +22,7 @@ NTSTATUS test_threads() {
         threadStart, nullptr, 0, 0, 0, 0, nullptr);
 
     if (status == STATUS_SUCCESS) {
-        std::printf("[+] NtCreateThreadEx succeeded. Thread Handle: %p\n", threadHandle);
+        std::printf("[OK] NtCreateThreadEx succeeded. Thread Handle: %p\n", threadHandle);
         WaitForSingleObject(threadHandle, INFINITE);
         CloseHandle(threadHandle);
         return STATUS_SUCCESS;
