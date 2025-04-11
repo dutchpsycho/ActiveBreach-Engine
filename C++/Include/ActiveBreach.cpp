@@ -46,6 +46,20 @@
 #include <immintrin.h>
 #include <intrin.h>
 
+using NtCreateThreadEx_t = NTSTATUS(NTAPI*)(
+    PHANDLE,
+    ACCESS_MASK,
+    POBJECT_ATTRIBUTES,
+    HANDLE,
+    PVOID,
+    PVOID,
+    ULONG,
+    SIZE_T,
+    SIZE_T,
+    SIZE_T,
+    PPS_ATTRIBUTE_LIST
+    );
+
 namespace {
 
     __forceinline bool _has_avx2() {
@@ -90,11 +104,6 @@ namespace {
         }
     }
 
-    [[noreturn]] void _fatal_err(const char* msg) {
-        std::cerr << msg << std::endl;
-        exit(1);
-    }
-
     void _Zero(void* buffer, size_t size) {
         SecureZeroMemory(buffer, size);
         VirtualFree(buffer, 0, MEM_RELEASE);
@@ -102,52 +111,92 @@ namespace {
 
 #define XOR_KEY 0x5A
 
-    // ntdll.dll, if plaintext then EDR will pick up it
-    static const wchar_t enc[] = {
-        0x0036, 0x0036, 0x003E, 0x0074, 0x0036, 0x0036, 0x003E, 0x002E, 0x0034
-    };
+    static const uint8_t enc_ntdll[] = { 0x0036, 0x0036, 0x003E, 0x0074, 0x0036, 0x0036, 0x003E, 0x002E, 0x0034 };
 
-    void _decode(wchar_t* decoded, size_t size) {
-        for (size_t i = 0; i < size; i++) {
-            decoded[i] = enc[size - i - 1] ^ XOR_KEY;
-        }
-        decoded[size] = L'\0';
-    }
+    void _decode(const uint8_t* input, wchar_t* output, size_t size, uint8_t key) { for (size_t i = 0; i < size; ++i) { output[i] = (wchar_t)(input[size - i - 1] ^ key); } output[size] = L'\0'; }
+
+#if defined(_M_X64)
 
     void* _Buffer(size_t* out_size) {
-        wchar_t system_dir[MAX_PATH];
-        if (!GetSystemDirectoryW(system_dir, MAX_PATH))
-            _fatal_err("Failed to retrieve the system directory");
+        if (!out_size)
+            return nullptr;
+
+        *out_size = 0;
+
+        typedef struct _UNICODE_STRING {
+            USHORT Length;
+            USHORT MaximumLength;
+            PWSTR  Buffer;
+        } UNICODE_STRING, * PUNICODE_STRING;
+
+        typedef struct _RTL_USER_PROCESS_PARAMETERS {
+            BYTE Reserved1[0x80];
+            PVOID Environment;
+        } RTL_USER_PROCESS_PARAMETERS, * PRTL_USER_PROCESS_PARAMETERS;
+
+        typedef struct _PEB {
+            BYTE Reserved1[0x20];
+            PRTL_USER_PROCESS_PARAMETERS ProcessParameters;
+        } PEB, * PPEB;
+
+        PPEB peb = (PPEB)__readgsqword(0x60);
+        if (!peb || !peb->ProcessParameters || !peb->ProcessParameters->Environment)
+            return nullptr;
+
+        wchar_t* env = (wchar_t*)peb->ProcessParameters->Environment;
+
+        const wchar_t target[] = L"SystemRoot=";
+        size_t target_len = ARRAYSIZE(target) - 1;
+
+        wchar_t* sysroot = nullptr;
+        while (*env) {
+            if (wcsncmp(env, target, target_len) == 0) {
+                sysroot = env + target_len;
+                break;
+            }
+            env += wcslen(env) + 1;
+        }
+
+        if (!sysroot)
+            return nullptr;
 
         wchar_t decoded[10];
-        _decode(decoded, 9);
+        _decode(enc_ntdll, decoded, 9, XOR_KEY);
 
         wchar_t path[MAX_PATH];
-        if (swprintf(path, MAX_PATH, L"%s\\%s", system_dir, decoded) < 0)
-            _fatal_err("Failed to build path");
+        if (swprintf(path, MAX_PATH, L"%s\\System32\\%s", sysroot, decoded) < 0)
+            return nullptr;
 
-        HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ,
-            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file == INVALID_HANDLE_VALUE)
-            _fatal_err("Failed to open file");
+            return nullptr;
 
         DWORD file_size = GetFileSize(file, nullptr);
-        if (file_size == INVALID_FILE_SIZE)
-            _fatal_err("Failed to get file size");
+        if (file_size == INVALID_FILE_SIZE) {
+            CloseHandle(file);
+            return nullptr;
+        }
 
         void* buffer = VirtualAlloc(nullptr, file_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        if (!buffer)
-            _fatal_err("Failed to allocate memory for file");
+        if (!buffer) {
+            CloseHandle(file);
+            return nullptr;
+        }
 
         DWORD bytes_read;
-        if (!ReadFile(file, buffer, file_size, &bytes_read, nullptr) || bytes_read != file_size)
-            _fatal_err("Failed to read file");
+        if (!ReadFile(file, buffer, file_size, &bytes_read, nullptr) || bytes_read != file_size) {
+            CloseHandle(file);
+            VirtualFree(buffer, 0, MEM_RELEASE);
+            return nullptr;
+        }
 
         CloseHandle(file);
-
         *out_size = file_size;
         return buffer;
     }
+
+#endif // _M_X64
+
 
     std::unordered_map<std::string, uint32_t> _ExtractSSN(void* mapped_base) {
         static uint8_t ssn_pool[32 * 1024];
@@ -227,7 +276,7 @@ namespace {
                 _syscall_stubs[hashed] = current_stub - 16;
             }
 #else
-            // Fallback for c++14 without structured bindings
+            // Fallback for C++14 without struct bindings
             for (auto it = syscall_table.begin(); it != syscall_table.end(); ++it) {
                 uint64_t hashed = _ab_hash(it->first.c_str());
                 current_stub = _CreateStub(current_stub, it->second);
@@ -266,7 +315,7 @@ namespace {
 
 
     //------------------------------------------------------------------------------
-    // Dispatcher Globals and Structures
+    // Dispatcher Globals & Structs
     //------------------------------------------------------------------------------
 
     // All stubs are assumed to have signature:
@@ -298,12 +347,15 @@ namespace {
     //------------------------------------------------------------------------------
     // Dispatcher Thread Function
     //------------------------------------------------------------------------------
+    DWORD WINAPI _ActiveBreach_Dispatcher(LPVOID) {
+        if (!_g_abCallEvent) {
+            // if this fails at thread start, just bail cleanly
+            return ERROR_INVALID_HANDLE;
+        }
 
-    DWORD WINAPI _ActiveBreach_Dispatcher(LPVOID /*lpParameter*/) {
-        if (!_g_abCallEvent)
-            _fatal_err("Dispatcher event not created");
         for (;;) {
-            WaitForSingleObject(_g_abCallEvent, INFINITE);
+            if (WaitForSingleObject(_g_abCallEvent, INFINITE) != WAIT_OBJECT_0)
+                continue; // event wait failed, skip and retry loop
 
             EnterCriticalSection(&_g_abCallCS);
             _ABCallRequest req = _g_abCallRequest;
@@ -312,83 +364,59 @@ namespace {
             _ABStubFn fn = reinterpret_cast<_ABStubFn>(req.stub);
             ULONG_PTR ret = 0;
 
-#if defined(_MSC_VER)
-            __assume(sizeof(req.args) / sizeof(req.args[0]) == 16);
-            __assume(req.arg_count <= 16);
-#endif
+            if (!fn || req.arg_count > 16) {
+                // invalid call; fail-safe return, signal completion w/ zero
+                EnterCriticalSection(&_g_abCallCS);
+                _g_abCallRequest.ret = 0;
+                LeaveCriticalSection(&_g_abCallCS);
 
-            switch (req.arg_count) {
+                SetEvent(req.complete);
+                continue;
+            }
 
-                DISPATCH_CALL(0,
-                    0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0, 0, 0)
+            alignas(32) ULONG_PTR padded[16];
 
-                    DISPATCH_CALL(1,
-                        req.args[0], 0, 0, 0, 0, 0, 0, 0,
-                        0, 0, 0, 0, 0, 0, 0, 0)
+            if (_has_avx2()) {
+                __m256i zero = _mm256_setzero_si256();
+                _mm256_store_si256((__m256i*) & padded[0], zero);
+                _mm256_store_si256((__m256i*) & padded[4], zero);
+                _mm256_store_si256((__m256i*) & padded[8], zero);
+                _mm256_store_si256((__m256i*) & padded[12], zero);
 
-                    DISPATCH_CALL(2,
-                        req.args[0], req.args[1], 0, 0, 0, 0, 0, 0,
-                        0, 0, 0, 0, 0, 0, 0, 0)
+                if (req.arg_count > 0) {
+                    __m256i arg0 = _mm256_loadu_si256((__m256i*) & req.args[0]);
+                    _mm256_store_si256((__m256i*) & padded[0], arg0);
+                }
+                if (req.arg_count > 4) {
+                    __m256i arg1 = _mm256_loadu_si256((__m256i*) & req.args[4]);
+                    _mm256_store_si256((__m256i*) & padded[4], arg1);
+                }
+                if (req.arg_count > 8) {
+                    __m256i arg2 = _mm256_loadu_si256((__m256i*) & req.args[8]);
+                    _mm256_store_si256((__m256i*) & padded[8], arg2);
+                }
+                if (req.arg_count > 12) {
+                    __m256i arg3 = _mm256_loadu_si256((__m256i*) & req.args[12]);
+                    _mm256_store_si256((__m256i*) & padded[12], arg3);
+                }
+            }
+            else {
+                for (size_t i = 0; i < 16; ++i)
+                    padded[i] = 0;
+                for (size_t i = 0; i < req.arg_count; ++i)
+                    padded[i] = req.args[i];
+            }
 
-                    DISPATCH_CALL(3,
-                        req.args[0], req.args[1], req.args[2], 0, 0, 0, 0, 0,
-                        0, 0, 0, 0, 0, 0, 0, 0)
-
-                    DISPATCH_CALL(4,
-                        req.args[0], req.args[1], req.args[2], req.args[3], 0, 0, 0, 0,
-                        0, 0, 0, 0, 0, 0, 0, 0)
-
-                    DISPATCH_CALL(5,
-                        req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], 0, 0, 0,
-                        0, 0, 0, 0, 0, 0, 0, 0)
-
-                    DISPATCH_CALL(6,
-                        req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], 0, 0,
-                        0, 0, 0, 0, 0, 0, 0, 0)
-
-                    DISPATCH_CALL(7,
-                        req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], 0,
-                        0, 0, 0, 0, 0, 0, 0, 0)
-
-                    DISPATCH_CALL(8,
-                        req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
-                        0, 0, 0, 0, 0, 0, 0, 0)
-
-                    DISPATCH_CALL(9,
-                        req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
-                        req.args[8], 0, 0, 0, 0, 0, 0, 0)
-
-                    DISPATCH_CALL(10,
-                        req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
-                        req.args[8], req.args[9], 0, 0, 0, 0, 0, 0)
-
-                    DISPATCH_CALL(11,
-                        req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
-                        req.args[8], req.args[9], req.args[10], 0, 0, 0, 0, 0)
-
-                    DISPATCH_CALL(12,
-                        req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
-                        req.args[8], req.args[9], req.args[10], req.args[11], 0, 0, 0, 0)
-
-                    DISPATCH_CALL(13,
-                        req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
-                        req.args[8], req.args[9], req.args[10], req.args[11], req.args[12], 0, 0, 0)
-
-                    DISPATCH_CALL(14,
-                        req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
-                        req.args[8], req.args[9], req.args[10], req.args[11], req.args[12], req.args[13], 0, 0)
-
-                    DISPATCH_CALL(15,
-                        req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
-                        req.args[8], req.args[9], req.args[10], req.args[11], req.args[12], req.args[13], req.args[14], 0)
-
-                    DISPATCH_CALL(16,
-                        req.args[0], req.args[1], req.args[2], req.args[3], req.args[4], req.args[5], req.args[6], req.args[7],
-                        req.args[8], req.args[9], req.args[10], req.args[11], req.args[12], req.args[13], req.args[14], req.args[15])
-
-            default:
-                _fatal_err("ActiveBreach: Invalid argument count in dispatcher");
+            __try {
+                ret = fn(
+                    padded[0], padded[1], padded[2], padded[3],
+                    padded[4], padded[5], padded[6], padded[7],
+                    padded[8], padded[9], padded[10], padded[11],
+                    padded[12], padded[13], padded[14], padded[15]
+                );
+            }
+            __except (EXCEPTION_EXECUTE_HANDLER) {
+                ret = 0; // safe default on call failure
             }
 
             EnterCriticalSection(&_g_abCallCS);
@@ -398,8 +426,9 @@ namespace {
             SetEvent(req.complete);
         }
 
-        return 0; // Never reached
+        return 0;
     }
+
 
 
     //------------------------------------------------------------------------------
@@ -408,13 +437,29 @@ namespace {
 
     DWORD WINAPI _ActiveBreach_ThreadProc(LPVOID /*lpParameter*/) {
         InitializeCriticalSection(&_g_abCallCS);
+
+        DWORD tid = __readgsdword(0x48); // TEB->ClientId.UniqueThread
+
+        if (tid != __readgsdword(0x48)) {
+            __fastfail(0xAB01); 
+        }
+
         _g_abCallEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-        if (!_g_abCallEvent)
-            _fatal_err("Failed to create dispatcher event");
+        if (!_g_abCallEvent) {
+            std::cerr << "ActiveBreach_ThreadProc: failed to create dispatcher event" << std::endl;
+
+            if (_g_abInitializedEvent)
+                SetEvent(_g_abInitializedEvent);
+
+            return ERROR_INVALID_HANDLE;
+        }
+
         if (_g_abInitializedEvent)
             SetEvent(_g_abInitializedEvent);
-        _ActiveBreach_Dispatcher(nullptr);
-        return 0;
+
+        DWORD result = _ActiveBreach_Dispatcher(nullptr);
+
+        return result;
     }
 
 
@@ -436,14 +481,14 @@ namespace {
 
 
     //------------------------------------------------------------------------------
-    // ActiveBreach call Implementation
+    // Call Implementation
     //------------------------------------------------------------------------------
 
     extern "C" ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...) {
-        if (!stub)
-            _fatal_err("_ActiveBreach_Call: stub is NULL");
-        if (arg_count > 8)
-            _fatal_err("_ActiveBreach_Call: Too many arguments (max 8)");
+        if (!stub || arg_count > 8) {
+            std::cerr << "_ActiveBreach_Call: invalid call (stub=null or arg_count > 8)" << std::endl;
+            return 0;
+        }
 
         _SyscallState execState;
         execState.start_time = __rdtsc();
@@ -461,23 +506,36 @@ namespace {
         va_end(vl);
 
         req.complete = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-        if (!req.complete)
-            _fatal_err("Failed to create completion event");
+        if (!req.complete) {
+            std::cerr << "_ActiveBreach_Call: failed to create completion event" << std::endl;
+            return 0;
+        }
 
         EnterCriticalSection(&_g_abCallCS);
         _g_abCallRequest = req;
         LeaveCriticalSection(&_g_abCallCS);
 
-        SetEvent(_g_abCallEvent);
-        WaitForSingleObject(req.complete, INFINITE);
+        if (_g_abCallEvent)
+            SetEvent(_g_abCallEvent);
+        else {
+            std::cerr << "_ActiveBreach_Call: dispatcher event is missing" << std::endl;
+            CloseHandle(req.complete);
+            return 0;
+        }
+
+        DWORD wait_result = WaitForSingleObject(req.complete, 5000);
+        CloseHandle(req.complete);
+
+        if (wait_result != WAIT_OBJECT_0) {
+            std::cerr << "_ActiveBreach_Call: dispatch wait failed (" << wait_result << ")" << std::endl;
+            return 0;
+        }
 
         EnterCriticalSection(&_g_abCallCS);
         ULONG_PTR ret = _g_abCallRequest.ret;
         LeaveCriticalSection(&_g_abCallCS);
-        CloseHandle(req.complete);
 
         ActiveBreach_Callback(execState);
-
         return ret;
     }
 }
@@ -494,24 +552,69 @@ extern "C" void ActiveBreach_launch(const char* notify) {
         void* mapped_base = _Buffer(&ab_handle_size);
         auto syscall_table = _ExtractSSN(mapped_base);
 
-        _Zero(mapped_base, ab_handle_size);
+        constexpr uint64_t hash_NtCreateThreadEx = 0xbcc7c24bdcfe64d3;
 
+        uint32_t ssn = 0;
+        for (const auto& [name, id] : syscall_table) {
+            if (_ab_hash(name.c_str()) == hash_NtCreateThreadEx) {
+                ssn = id;
+                break;
+            }
+        }
+
+        if (ssn == 0)
+            throw std::runtime_error("SSN table corrupt");
+
+        _Zero(mapped_base, ab_handle_size);
         _g_ab_internal._BuildStubs(syscall_table);
 
         _g_abInitializedEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
         if (!_g_abInitializedEvent)
             throw std::runtime_error("Failed to create initialization event");
 
-        HANDLE hThread = CreateThread(nullptr, 0, _ActiveBreach_ThreadProc, nullptr, 0, nullptr);
-        if (!hThread)
-            throw std::runtime_error("Failed to create ActiveBreach dispatcher thread");
+        void* syscall_stub = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!syscall_stub)
+            throw std::runtime_error("Failed to allocate syscall stub memory");
+
+        uint8_t raw_stub[] = {
+            0x4C, 0x8B, 0xD1,             // mov r10, rcx
+            0xB8, 0, 0, 0, 0,             // mov eax, <ssn>
+            0x0F, 0x05,                   // syscall
+            0xC3                          // ret
+        };
+
+        memcpy(syscall_stub, raw_stub, sizeof(raw_stub));
+        *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(syscall_stub) + 4) = ssn;
+
+        HANDLE hThread = nullptr;
+        auto _sysNtCreateThreadEx = reinterpret_cast<NtCreateThreadEx_t>(syscall_stub);
+
+        NTSTATUS status = _sysNtCreateThreadEx(
+            &hThread,
+            THREAD_ALL_ACCESS,
+            nullptr,
+            (HANDLE)(LONG_PTR)-1,
+            _ActiveBreach_ThreadProc,
+            nullptr,
+            0,
+            0,
+            0,
+            0,
+            nullptr
+        );
+
+        SecureZeroMemory(syscall_stub, sizeof(raw_stub));
+        VirtualFree(syscall_stub, 0, MEM_RELEASE);
+
+        if (status < 0 || !hThread)
+            throw std::runtime_error(" syscall failed");
 
         WaitForSingleObject(_g_abInitializedEvent, INFINITE);
         CloseHandle(_g_abInitializedEvent);
         _g_abInitializedEvent = nullptr;
         CloseHandle(hThread);
 
-        if (notify && std::strcmp(notify, "LMK") == 0)
+        if (notify && strcmp(notify, "LMK") == 0)
             std::cout << "[AB] ACTIVEBREACH OPERATIONAL" << std::endl;
     }
     catch (const std::exception& e) {
@@ -527,19 +630,14 @@ extern "C" void* _ab_get_stub(const char* name) {
 }
 
 extern "C" ULONG_PTR ab_call_fn(const char* name, size_t arg_count, ...) {
-    if (!name) {
-        std::cerr << "ab_call_fn: name is null" << std::endl;
+    if (!name || arg_count > 16) {
+        std::cerr << "ab_call_fn: invalid input (null name or arg_count > 16)" << std::endl;
         return 0;
     }
 
     void* stub = _g_ab_internal._GetStub(name);
     if (!stub) {
         std::cerr << "ab_call_fn: stub not found for '" << name << "'" << std::endl;
-        return 0;
-    }
-
-    if (arg_count > 16) {
-        std::cerr << "ab_call_fn: Too many arguments (" << arg_count << " > 16)" << std::endl;
         return 0;
     }
 
@@ -559,23 +657,39 @@ extern "C" ULONG_PTR ab_call_fn(const char* name, size_t arg_count, ...) {
     va_end(vl);
 
     req.complete = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-    if (!req.complete)
-        _fatal_err("ab_call_fn: Failed to create completion event");
+    if (!req.complete) {
+        std::cerr << "ab_call_fn: failed to create completion event" << std::endl;
+        return 0;
+    }
 
+    // sync request w/ dispatcher
     EnterCriticalSection(&_g_abCallCS);
+
     _g_abCallRequest = req;
+
     LeaveCriticalSection(&_g_abCallCS);
 
-    SetEvent(_g_abCallEvent);
-    WaitForSingleObject(req.complete, INFINITE);
+    if (_g_abCallEvent)
+        SetEvent(_g_abCallEvent);
+    else {
+        std::cerr << "ab_call_fn: dispatcher event handle missing" << std::endl;
+        CloseHandle(req.complete);
+        return 0;
+    }
+
+    DWORD wait_result = WaitForSingleObject(req.complete, 5000); // 5s timeout to prevent hangs
+    CloseHandle(req.complete);
+
+    if (wait_result != WAIT_OBJECT_0) {
+        std::cerr << "ab_call_fn: wait timeout or error (" << wait_result << ")" << std::endl;
+        return 0;
+    }
 
     EnterCriticalSection(&_g_abCallCS);
     ULONG_PTR ret = _g_abCallRequest.ret;
     LeaveCriticalSection(&_g_abCallCS);
-    CloseHandle(req.complete);
 
     ActiveBreach_Callback(execState);
-
     return ret;
 }
 

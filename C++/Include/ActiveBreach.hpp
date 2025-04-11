@@ -47,6 +47,18 @@ constexpr DWORD ACTIVEBREACH_SYSCALL_RETURNMODIFIED = 0xE0001001;
 constexpr DWORD ACTIVEBREACH_SYSCALL_STACKPTRMODIFIED = 0xE0001002;
 constexpr DWORD ACTIVEBREACH_SYSCALL_LONGSYSCALL = 0xE0001003;
 
+constexpr DWORD ACTIVEBREACH_SYSCALL_CHAINCORRUPTED = 0xE0001004; // stack walk fingerprint mismatch
+constexpr DWORD ACTIVEBREACH_SYSCALL_THREADHIJACKED = 0xE0001005; // TEB.TID mismatch
+constexpr DWORD ACTIVEBREACH_SYSCALL_RETADDRCOOKIEFAIL = 0xE0001006; // return address xor-check failed
+constexpr DWORD ACTIVEBREACH_SYSCALL_DEBUGGER_PRESENT = 0xE0001007; // PEB->BeingDebugged triggered
+constexpr DWORD ACTIVEBREACH_SYSCALL_HEAPCHECK_ENABLED = 0xE0001008; // NtGlobalFlags has heap flags
+constexpr DWORD ACTIVEBREACH_SYSCALL_TSCQPC_ANOMALY = 0xE0001009; // RDTSC/QPC mismatch or suspicious entropy
+constexpr DWORD ACTIVEBREACH_SYSCALL_IP_INVALID = 0xE000100A; // return address outside .text bounds
+constexpr DWORD ACTIVEBREACH_SYSCALL_INLINE_PATCHED = 0xE000100B; // syscall stub patched / breakpoint opcode
+constexpr DWORD ACTIVEBREACH_SYSCALL_HYPERVISOR_DETECTED = 0xE000100C; // CPUID leaf reveals VM
+constexpr DWORD ACTIVEBREACH_SYSCALL_VEH_REGISTERED = 0xE000100D; // VEH/SEH handler detected
+constexpr DWORD ACTIVEBREACH_SYSCALL_SEGREG_FAULT = 0xE000100E; // FS/GS segment tampering detected
+
 constexpr uint64_t SYSCALL_TIME_THRESHOLD = 50000000ULL;
 
 struct _SyscallState {
@@ -61,6 +73,36 @@ struct _SyscallState {
 #ifndef STATUS_INFO_LENGTH_MISMATCH
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
 #endif
+
+typedef struct _UNICODE_STRING {
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR  Buffer;
+} UNICODE_STRING, * PUNICODE_STRING;
+
+typedef struct _OBJECT_ATTRIBUTES {
+    ULONG           Length;
+    HANDLE          RootDirectory;
+    PUNICODE_STRING ObjectName;
+    ULONG           Attributes;
+    PVOID           SecurityDescriptor;
+    PVOID           SecurityQualityOfService;
+} OBJECT_ATTRIBUTES, * POBJECT_ATTRIBUTES;
+
+typedef struct _PS_ATTRIBUTE {
+    ULONG_PTR Attribute;
+    SIZE_T Size;
+    union {
+        ULONG_PTR Value;
+        PVOID Ptr;
+    };
+    PSIZE_T ReturnLength;
+} PS_ATTRIBUTE, * PPS_ATTRIBUTE;
+
+typedef struct _PS_ATTRIBUTE_LIST {
+    SIZE_T       TotalLength;
+    PS_ATTRIBUTE Attributes[1];
+} PS_ATTRIBUTE_LIST, * PPS_ATTRIBUTE_LIST;
 
 /*
  * ActiveBreach_launch:
