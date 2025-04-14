@@ -46,6 +46,42 @@
 #include <immintrin.h>
 #include <intrin.h>
 
+typedef struct _SyscallState {
+    uint64_t start_time;
+    void* stack_ptr;
+    void* ret_addr;
+} SyscallState;
+
+typedef struct _UNICODE_STRING {
+    USHORT Length;
+    USHORT MaximumLength;
+    PWSTR  Buffer;
+} UNICODE_STRING, * PUNICODE_STRING;
+
+typedef struct _OBJECT_ATTRIBUTES {
+    ULONG           Length;
+    HANDLE          RootDirectory;
+    PUNICODE_STRING ObjectName;
+    ULONG           Attributes;
+    PVOID           SecurityDescriptor;
+    PVOID           SecurityQualityOfService;
+} OBJECT_ATTRIBUTES, * POBJECT_ATTRIBUTES;
+
+typedef struct _PS_ATTRIBUTE {
+    ULONG_PTR Attribute;
+    SIZE_T Size;
+    union {
+        ULONG_PTR Value;
+        PVOID Ptr;
+    };
+    PSIZE_T ReturnLength;
+} PS_ATTRIBUTE, * PPS_ATTRIBUTE;
+
+typedef struct _PS_ATTRIBUTE_LIST {
+    SIZE_T TotalLength;
+    PS_ATTRIBUTE Attributes[1];
+} PS_ATTRIBUTE_LIST, * PPS_ATTRIBUTE_LIST;
+
 using NtCreateThreadEx_t = NTSTATUS(NTAPI*)(
     PHANDLE,
     ACCESS_MASK,
@@ -112,10 +148,13 @@ namespace {
 #define XOR_KEY 0x5A
 
     static const uint8_t enc_ntdll[] = { 0x0036, 0x0036, 0x003E, 0x0074, 0x0036, 0x0036, 0x003E, 0x002E, 0x0034 };
+    static const uint8_t enc_System32[] = { 0x68, 0x69, 0x37, 0x37, 0x3F, 0x2E, 0x23, 0x09 };
+    static const uint8_t enc_SystemRoot[] = { 0x2E, 0x35, 0x35, 0x08, 0x28, 0x3F, 0x28, 0x3F, 0x23, 0x09 };
 
     void _decode(const uint8_t* input, wchar_t* output, size_t size, uint8_t key) { for (size_t i = 0; i < size; ++i) { output[i] = (wchar_t)(input[size - i - 1] ^ key); } output[size] = L'\0'; }
 
 #if defined(_M_X64)
+    // TODO: replace SystemRoot & System32 with encoded vers
 
     void* _Buffer(size_t* out_size) {
         if (!out_size)
@@ -123,82 +162,80 @@ namespace {
 
         *out_size = 0;
 
-        typedef struct _UNICODE_STRING {
-            USHORT Length;
-            USHORT MaximumLength;
-            PWSTR  Buffer;
-        } UNICODE_STRING, * PUNICODE_STRING;
-
-        typedef struct _RTL_USER_PROCESS_PARAMETERS {
-            BYTE Reserved1[0x80];
-            PVOID Environment;
-        } RTL_USER_PROCESS_PARAMETERS, * PRTL_USER_PROCESS_PARAMETERS;
-
-        typedef struct _PEB {
-            BYTE Reserved1[0x20];
-            PRTL_USER_PROCESS_PARAMETERS ProcessParameters;
-        } PEB, * PPEB;
-
-        PPEB peb = (PPEB)__readgsqword(0x60);
-        if (!peb || !peb->ProcessParameters || !peb->ProcessParameters->Environment)
-            return nullptr;
-
-        wchar_t* env = (wchar_t*)peb->ProcessParameters->Environment;
-
-        const wchar_t target[] = L"SystemRoot=";
-        size_t target_len = ARRAYSIZE(target) - 1;
-
-        wchar_t* sysroot = nullptr;
-        while (*env) {
-            if (wcsncmp(env, target, target_len) == 0) {
-                sysroot = env + target_len;
-                break;
-            }
-            env += wcslen(env) + 1;
-        }
-
-        if (!sysroot)
-            return nullptr;
-
         wchar_t decoded[10];
         _decode(enc_ntdll, decoded, 9, XOR_KEY);
 
+        wchar_t sysdir[MAX_PATH];
+        if (!GetEnvironmentVariableW(L"SystemRoot", sysdir, MAX_PATH))
+            return nullptr;
+
         wchar_t path[MAX_PATH];
-        if (swprintf(path, MAX_PATH, L"%s\\System32\\%s", sysroot, decoded) < 0)
+        if (swprintf(path, MAX_PATH, L"%s\\System32\\%s", sysdir, decoded) < 0)
             return nullptr;
 
         HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (file == INVALID_HANDLE_VALUE)
             return nullptr;
 
-        DWORD file_size = GetFileSize(file, nullptr);
-        if (file_size == INVALID_FILE_SIZE) {
+        DWORD size = GetFileSize(file, nullptr);
+        if (size == INVALID_FILE_SIZE || size < sizeof(IMAGE_DOS_HEADER)) {
             CloseHandle(file);
             return nullptr;
         }
 
-        void* buffer = VirtualAlloc(nullptr, file_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        if (!buffer) {
+        uint8_t* raw = static_cast<uint8_t*>(VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!raw) {
             CloseHandle(file);
             return nullptr;
         }
 
-        DWORD bytes_read;
-        if (!ReadFile(file, buffer, file_size, &bytes_read, nullptr) || bytes_read != file_size) {
+        DWORD read;
+        if (!ReadFile(file, raw, size, &read, nullptr) || read != size) {
+            VirtualFree(raw, 0, MEM_RELEASE);
             CloseHandle(file);
-            VirtualFree(buffer, 0, MEM_RELEASE);
             return nullptr;
         }
-
         CloseHandle(file);
-        *out_size = file_size;
-        return buffer;
+
+        const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(raw);
+        const IMAGE_NT_HEADERS* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(raw + dos->e_lfanew);
+
+        SIZE_T full_size = nt->OptionalHeader.SizeOfImage;
+        uint8_t* mapped = static_cast<uint8_t*>(VirtualAlloc(nullptr, full_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        if (!mapped) {
+            VirtualFree(raw, 0, MEM_RELEASE);
+            return nullptr;
+        }
+
+        memcpy(mapped, raw, nt->OptionalHeader.SizeOfHeaders);
+
+        const IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+        for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+            if (sec[i].SizeOfRawData == 0)
+                continue;
+
+            if (sec[i].PointerToRawData + sec[i].SizeOfRawData > size)
+                continue; // file corruption
+
+            if (sec[i].VirtualAddress + sec[i].SizeOfRawData > full_size)
+                continue; // invalid VA
+
+            memcpy(
+                mapped + sec[i].VirtualAddress,
+                raw + sec[i].PointerToRawData,
+                sec[i].SizeOfRawData
+            );
+        }
+
+        VirtualFree(raw, 0, MEM_RELEASE);
+        *out_size = full_size;
+        return mapped;
     }
 
 #endif // _M_X64
 
 
-    std::unordered_map<std::string, uint32_t> _ExtractSSN(void* mapped_base) {
+    std::unordered_map<std::string, uint32_t> _ExtractSSN(void* mapped_base, size_t image_size) {
         static uint8_t ssn_pool[32 * 1024];
 #if __cplusplus >= 202002L
         std::pmr::monotonic_buffer_resource arena(ssn_pool, sizeof(ssn_pool));
@@ -211,31 +248,63 @@ namespace {
         const auto* base = static_cast<uint8_t*>(mapped_base);
         const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
 
-        if (dos->e_magic != IMAGE_DOS_SIGNATURE) throw std::runtime_error("Invalid DOS header");
+        if (image_size < sizeof(IMAGE_DOS_HEADER) || dos->e_magic != IMAGE_DOS_SIGNATURE)
+            throw std::runtime_error("Invalid DOS header");
 
         const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+        if ((uintptr_t)nt + sizeof(IMAGE_NT_HEADERS) > (uintptr_t)base + image_size)
+            throw std::runtime_error("Invalid NT header offset");
 
-        if (nt->Signature != IMAGE_NT_SIGNATURE) throw std::runtime_error("Invalid NT header");
+        if (nt->Signature != IMAGE_NT_SIGNATURE)
+            throw std::runtime_error("Invalid NT header signature");
 
         const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-
-        if (dir.VirtualAddress == 0) throw std::runtime_error("No export directory");
+        if (dir.VirtualAddress == 0 || dir.VirtualAddress >= image_size)
+            throw std::runtime_error("No or invalid export directory");
 
         const auto* exp = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base + dir.VirtualAddress);
+        if ((uintptr_t)exp + sizeof(IMAGE_EXPORT_DIRECTORY) > (uintptr_t)base + image_size)
+            throw std::runtime_error("Corrupt export directory");
+
         const uint32_t* names = reinterpret_cast<const uint32_t*>(base + exp->AddressOfNames);
         const uint32_t* funcs = reinterpret_cast<const uint32_t*>(base + exp->AddressOfFunctions);
         const uint16_t* ordinals = reinterpret_cast<const uint16_t*>(base + exp->AddressOfNameOrdinals);
 
+        const size_t name_table_end = (uintptr_t)names + sizeof(uint32_t) * exp->NumberOfNames;
+        const size_t ordinal_table_end = (uintptr_t)ordinals + sizeof(uint16_t) * exp->NumberOfNames;
+        const size_t func_table_end = (uintptr_t)funcs + sizeof(uint32_t) * exp->NumberOfFunctions;
+
+        if (name_table_end > (uintptr_t)base + image_size ||
+            ordinal_table_end > (uintptr_t)base + image_size ||
+            func_table_end > (uintptr_t)base + image_size)
+            throw std::runtime_error("Corrupt export directory tables");
+
         for (uint32_t i = 0; i < exp->NumberOfNames; ++i) {
-            const char* fn = reinterpret_cast<const char*>(base + names[i]);
+            const uint32_t name_rva = names[i];
+            if (name_rva >= image_size)
+                continue;
+
+            const char* fn = reinterpret_cast<const char*>(base + name_rva);
+
+            // extra paranoia: check we can at least read fn[0] and fn[1]
+            if ((uintptr_t)fn + 2 > (uintptr_t)base + image_size)
+                continue;
+
             if (fn[0] == 'N' && fn[1] == 't') {
 #if __cplusplus >= 202002L
                 std::pmr::string name(fn, &arena);
 #else
                 std::string name(fn);
 #endif
-                const uint32_t rva = funcs[ordinals[i]];
-                const uint32_t ssn = *reinterpret_cast<const uint32_t*>(base + rva + 4);
+                const uint16_t ord = ordinals[i];
+                if (ord >= exp->NumberOfFunctions)
+                    continue;
+
+                const uint32_t func_rva = funcs[ord];
+                if (func_rva + 4 >= image_size)
+                    continue;
+
+                const uint32_t ssn = *reinterpret_cast<const uint32_t*>(base + func_rva + 4);
                 tmp.emplace(std::move(name), ssn);
             }
         }
@@ -276,7 +345,7 @@ namespace {
                 _syscall_stubs[hashed] = current_stub - 16;
             }
 #else
-            // Fallback for C++14 without struct bindings
+            // Fallback for c++14 without structured bindings
             for (auto it = syscall_table.begin(); it != syscall_table.end(); ++it) {
                 uint64_t hashed = _ab_hash(it->first.c_str());
                 current_stub = _CreateStub(current_stub, it->second);
@@ -315,7 +384,7 @@ namespace {
 
 
     //------------------------------------------------------------------------------
-    // Dispatcher Globals & Structs
+    // Dispatcher Globals and Structures
     //------------------------------------------------------------------------------
 
     // All stubs are assumed to have signature:
@@ -355,7 +424,7 @@ namespace {
 
         for (;;) {
             if (WaitForSingleObject(_g_abCallEvent, INFINITE) != WAIT_OBJECT_0)
-                continue; // event wait failed, skip and retry loop
+                continue; // event wait failed, just skip and retry loop
 
             EnterCriticalSection(&_g_abCallCS);
             _ABCallRequest req = _g_abCallRequest;
@@ -448,18 +517,19 @@ namespace {
         if (!_g_abCallEvent) {
             std::cerr << "ActiveBreach_ThreadProc: failed to create dispatcher event" << std::endl;
 
+            // signal init fail if event exists
             if (_g_abInitializedEvent)
                 SetEvent(_g_abInitializedEvent);
 
             return ERROR_INVALID_HANDLE;
         }
 
+        // signal dispatcher ready
         if (_g_abInitializedEvent)
             SetEvent(_g_abInitializedEvent);
 
         DWORD result = _ActiveBreach_Dispatcher(nullptr);
-
-        return result;
+        return result; // return actual dispatcher exit code (should normally loop forever)
     }
 
 
@@ -468,25 +538,24 @@ namespace {
     //------------------------------------------------------------------------------
 
     void ActiveBreach_Callback(const _SyscallState& state) {
-        uint64_t end_time = __rdtsc();
-        uint64_t elapsed = end_time - state.start_time;
+        // uint64_t end_time = __rdtsc();
+        // uint64_t elapsed = end_time - state.start_time;
 
-        void* current_stack_ptr = _AddressOfReturnAddress();
-        void* current_ret_addr = _ReturnAddress();
+        // void* current_stack_ptr = _AddressOfReturnAddress();
+        // void* current_ret_addr = _ReturnAddress();
 
-        if (current_stack_ptr != state.stack_ptr) { RaiseException(ACTIVEBREACH_SYSCALL_STACKPTRMODIFIED, 0, 0, nullptr); }
-        if (current_ret_addr != state.ret_addr) { RaiseException(ACTIVEBREACH_SYSCALL_RETURNMODIFIED, 0, 0, nullptr); }
-        if (elapsed > SYSCALL_TIME_THRESHOLD) { RaiseException(ACTIVEBREACH_SYSCALL_LONGSYSCALL, 0, 0, nullptr); }
+        // if (current_stack_ptr != state.stack_ptr) { RaiseException(ACTIVEBREACH_SYSCALL_STACKPTRMODIFIED, 0, 0, nullptr); }
+        // if (current_ret_addr != state.ret_addr) { RaiseException(ACTIVEBREACH_SYSCALL_RETURNMODIFIED, 0, 0, nullptr); }
+        // if (elapsed > SYSCALL_TIME_THRESHOLD) { RaiseException(ACTIVEBREACH_SYSCALL_LONGSYSCALL, 0, 0, nullptr); }
     }
 
-
     //------------------------------------------------------------------------------
-    // Call Implementation
+    // ActiveBreach call Implementation
     //------------------------------------------------------------------------------
 
     extern "C" ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...) {
         if (!stub || arg_count > 8) {
-            std::cerr << "_ActiveBreach_Call: invalid call (stub=null or arg_count > 8)" << std::endl;
+            std::cerr << "_ActiveBreach_Call: invalid call (stub=null or arg_count > 16)" << std::endl;
             return 0;
         }
 
@@ -550,7 +619,7 @@ extern "C" void ActiveBreach_launch(const char* notify) {
         size_t ab_handle_size = 0;
 
         void* mapped_base = _Buffer(&ab_handle_size);
-        auto syscall_table = _ExtractSSN(mapped_base);
+        auto syscall_table = _ExtractSSN(mapped_base, ab_handle_size);
 
         constexpr uint64_t hash_NtCreateThreadEx = 0xbcc7c24bdcfe64d3;
 
@@ -664,9 +733,7 @@ extern "C" ULONG_PTR ab_call_fn(const char* name, size_t arg_count, ...) {
 
     // sync request w/ dispatcher
     EnterCriticalSection(&_g_abCallCS);
-
     _g_abCallRequest = req;
-
     LeaveCriticalSection(&_g_abCallCS);
 
     if (_g_abCallEvent)
