@@ -128,37 +128,62 @@ void _decode(wchar_t* decoded, size_t size) {
 }
 
 void* _Buffer(size_t* out_size) {
-    wchar_t system_dir[MAX_PATH];
-    if (!GetSystemDirectoryW(system_dir, MAX_PATH))
-        fatal_err("Failed to retrieve the system directory");
-
     wchar_t decoded[10];
     _decode(decoded, 9);
 
+    wchar_t sysdir[MAX_PATH];
+    if (!GetEnvironmentVariableW(L"SystemRoot", sysdir, MAX_PATH))
+        fatal_err("Failed to get SystemRoot");
+
     wchar_t path[MAX_PATH];
-    if (swprintf(path, MAX_PATH, L"%s\\%s", system_dir, decoded) < 0)
-        fatal_err("Failed to build path");
+    if (swprintf(path, MAX_PATH, L"%s\\System32\\%s", sysdir, decoded) < 0)
+        fatal_err("Failed to construct ntdll path");
 
     HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE)
-        fatal_err("Failed to open file");
+        fatal_err("Failed to open ntdll");
 
-    DWORD file_size = GetFileSize(file, NULL);
-    if (file_size == INVALID_FILE_SIZE)
-        fatal_err("Failed to get file size");
+    DWORD size = GetFileSize(file, NULL);
+    if (size == INVALID_FILE_SIZE)
+        fatal_err("Invalid file size");
 
-    void* buffer = VirtualAlloc(NULL, file_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!buffer)
-        fatal_err("Failed to allocate memory for file");
+    uint8_t* raw = VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!raw)
+        fatal_err("Alloc failed");
 
-    DWORD bytes_read;
-    if (!ReadFile(file, buffer, file_size, &bytes_read, NULL) || bytes_read != file_size)
-        fatal_err("Failed to read file");
+    DWORD read;
+    if (!ReadFile(file, raw, size, &read, NULL) || read != size)
+        fatal_err("Failed to read");
 
     CloseHandle(file);
 
-    *out_size = file_size;
-    return buffer;
+    IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)raw;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(raw + dos->e_lfanew);
+
+    SIZE_T full_size = nt->OptionalHeader.SizeOfImage;
+    uint8_t* mapped = VirtualAlloc(NULL, full_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!mapped)
+        fatal_err("Map alloc failed");
+
+    memcpy(mapped, raw, nt->OptionalHeader.SizeOfHeaders);
+
+    IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
+        if (sec[i].SizeOfRawData == 0) continue;
+
+        if (sec[i].PointerToRawData + sec[i].SizeOfRawData > size) continue;
+        if (sec[i].VirtualAddress + sec[i].SizeOfRawData > full_size) continue;
+
+        memcpy(
+            mapped + sec[i].VirtualAddress,
+            raw + sec[i].PointerToRawData,
+            sec[i].SizeOfRawData
+        );
+    }
+
+    VirtualFree(raw, 0, MEM_RELEASE);
+    *out_size = full_size;
+    return mapped;
 }
 
 void _Cleanup(void* mapped_base) {
