@@ -2,6 +2,7 @@
 */64
 **/target
 **cargo.lock
+/live
 
 # Visual Studio
 .vs/

@@ -30,7 +30,6 @@
 #include "ActiveBreach.hpp"
 
 #include <windows.h>
-#include <intrin.h>
 
 #include <stdexcept>
 #include <string>
@@ -46,19 +45,29 @@
 #include <immintrin.h>
 #include <intrin.h>
 
-using NtCreateThreadEx_t = NTSTATUS(NTAPI*)(
-    PHANDLE,
-    ACCESS_MASK,
-    POBJECT_ATTRIBUTES,
-    HANDLE,
-    PVOID,
-    PVOID,
-    ULONG,
-    SIZE_T,
-    SIZE_T,
-    SIZE_T,
-    PPS_ATTRIBUTE_LIST
-    );
+using NtCreateThreadEx_t = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, HANDLE, PVOID, PVOID, ULONG, SIZE_T, SIZE_T, SIZE_T, PPS_ATTRIBUTE_LIST);
+
+#pragma function(strlen)
+extern "C" size_t __cdecl strlen(const char* str) {
+    size_t len = 0;
+    while (str[len] && len < 0x1000)
+        len++;
+    return len;
+}
+
+#pragma function(strcmp)
+extern "C" int __cdecl strcmp(const char* s1, const char* s2) {
+    while (*s1 && *s2) {
+        if (*s1 != *s2) return (unsigned char)*s1 - (unsigned char)*s2;
+        s1++; s2++;
+    }
+    return (unsigned char)*s1 - (unsigned char)*s2;
+}
+
+__forceinline void _decrypt_stub(uint8_t* out, const uint8_t* enc, const uint8_t* key) {
+    for (int i = 0; i < 16; ++i)
+        out[i] = enc[i] ^ key[i];
+}
 
 namespace {
 
@@ -104,21 +113,26 @@ namespace {
         }
     }
 
+    __declspec(noinline) void _decstr(std::string& str) {
+        uint8_t k1 = static_cast<uint8_t>(str.length() ^ 0xA5);
+        uint8_t k2 = 0x5F;
+
+        std::reverse(str.begin(), str.end());
+
+        for (size_t i = 0; i < str.length(); ++i) {
+            uint8_t ch = static_cast<uint8_t>(str[i]);
+            ch ^= ((i * 17) & 0xFF);
+            ch = (ch >> 3) | (ch << 5);
+            ch = static_cast<uint8_t>((ch - (k2 ^ (i << 1))) ^ (k1 + i));
+            str[i] = static_cast<char>(ch);
+        }
+    }
+
     void _Zero(void* buffer, size_t size) {
         SecureZeroMemory(buffer, size);
         VirtualFree(buffer, 0, MEM_RELEASE);
     }
 
-#define XOR_KEY 0x5A
-
-    static const uint8_t enc_ntdll[] = { 0x0036, 0x0036, 0x003E, 0x0074, 0x0036, 0x0036, 0x003E, 0x002E, 0x0034 };
-    static const uint8_t enc_System32[] = { 0x68, 0x69, 0x37, 0x37, 0x3F, 0x2E, 0x23, 0x09 };
-    static const uint8_t enc_SystemRoot[] = { 0x2E, 0x35, 0x35, 0x08, 0x28, 0x3F, 0x28, 0x3F, 0x23, 0x09 };
-
-    void _decode(const uint8_t* input, wchar_t* output, size_t size, uint8_t key) { for (size_t i = 0; i < size; ++i) { output[i] = (wchar_t)(input[size - i - 1] ^ key); } output[size] = L'\0'; }
-
-#if defined(_M_X64)
-    // TODO: replace SystemRoot & System32 with encoded vers
 
     void* _Buffer(size_t* out_size) {
         if (!out_size)
@@ -126,15 +140,34 @@ namespace {
 
         *out_size = 0;
 
-        wchar_t decoded[10];
-        _decode(enc_ntdll, decoded, 9, XOR_KEY);
+        std::string enc_dll = "\xB1\xF6\x2F\xF2\xDD\xD3\x0B\xA0\x09";         // "ntdll.dll"
+        std::string enc_env = "\x51\xB1\x26\xB7\x24\x2D\xCB\xCA\x20\xDA";     // "SystemRoot"
+        std::string enc_sys = "\xC9\xF8\xF4\x1D\xDB\x9B\xB0\xEA";             // "System32"
+
+        _decstr(enc_dll);
+        _decstr(enc_env);
+        _decstr(enc_sys);
 
         wchar_t sysdir[MAX_PATH];
-        if (!GetEnvironmentVariableW(L"SystemRoot", sysdir, MAX_PATH))
+        wchar_t wide_env[MAX_PATH];
+        size_t converted = 0;
+
+        if (mbstowcs_s(&converted, wide_env, enc_env.c_str(), MAX_PATH) != 0)
+            return nullptr;
+
+        if (!GetEnvironmentVariableW(wide_env, sysdir, MAX_PATH))
             return nullptr;
 
         wchar_t path[MAX_PATH];
-        if (swprintf(path, MAX_PATH, L"%s\\System32\\%s", sysdir, decoded) < 0)
+        wchar_t wide_dll[MAX_PATH], wide_sys[MAX_PATH];
+
+        if (mbstowcs_s(&converted, wide_dll, enc_dll.c_str(), MAX_PATH) != 0)
+            return nullptr;
+
+        if (mbstowcs_s(&converted, wide_sys, enc_sys.c_str(), MAX_PATH) != 0)
+            return nullptr;
+
+        if (swprintf(path, MAX_PATH, L"%s\\%s\\%s", sysdir, wide_sys, wide_dll) < 0)
             return nullptr;
 
         HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -159,6 +192,7 @@ namespace {
             CloseHandle(file);
             return nullptr;
         }
+
         CloseHandle(file);
 
         const IMAGE_DOS_HEADER* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(raw);
@@ -179,10 +213,10 @@ namespace {
                 continue;
 
             if (sec[i].PointerToRawData + sec[i].SizeOfRawData > size)
-                continue; // file corruption
+                continue;
 
             if (sec[i].VirtualAddress + sec[i].SizeOfRawData > full_size)
-                continue; // invalid VA
+                continue;
 
             memcpy(
                 mapped + sec[i].VirtualAddress,
@@ -193,13 +227,11 @@ namespace {
 
         VirtualFree(raw, 0, MEM_RELEASE);
         *out_size = full_size;
+
         return mapped;
     }
 
-#endif // _M_X64
-
-
-    std::unordered_map<std::string, uint32_t> _ExtractSSN(void* mapped_base, size_t image_size) {
+    std::unordered_map<std::string, uint32_t> _Exfil(void* mapped_base, size_t image_size) {
         static uint8_t ssn_pool[32 * 1024];
 #if __cplusplus >= 202002L
         std::pmr::monotonic_buffer_resource arena(ssn_pool, sizeof(ssn_pool));
@@ -213,22 +245,22 @@ namespace {
         const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
 
         if (image_size < sizeof(IMAGE_DOS_HEADER) || dos->e_magic != IMAGE_DOS_SIGNATURE)
-            throw std::runtime_error("Invalid DOS header");
+            throw std::runtime_error("DOS header corrupt");
 
         const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
         if ((uintptr_t)nt + sizeof(IMAGE_NT_HEADERS) > (uintptr_t)base + image_size)
-            throw std::runtime_error("Invalid NT header offset");
+            throw std::runtime_error("NT header corrupt");
 
         if (nt->Signature != IMAGE_NT_SIGNATURE)
-            throw std::runtime_error("Invalid NT header signature");
+            throw std::runtime_error("NT sig corrupt");
 
         const auto& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
         if (dir.VirtualAddress == 0 || dir.VirtualAddress >= image_size)
-            throw std::runtime_error("No or invalid export directory");
+            throw std::runtime_error("IMAGE_DIRECTORY corrupt");
 
         const auto* exp = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base + dir.VirtualAddress);
         if ((uintptr_t)exp + sizeof(IMAGE_EXPORT_DIRECTORY) > (uintptr_t)base + image_size)
-            throw std::runtime_error("Corrupt export directory");
+            throw std::runtime_error("IMAGE_EXPORT corrupt");
 
         const uint32_t* names = reinterpret_cast<const uint32_t*>(base + exp->AddressOfNames);
         const uint32_t* funcs = reinterpret_cast<const uint32_t*>(base + exp->AddressOfFunctions);
@@ -241,7 +273,16 @@ namespace {
         if (name_table_end > (uintptr_t)base + image_size ||
             ordinal_table_end > (uintptr_t)base + image_size ||
             func_table_end > (uintptr_t)base + image_size)
-            throw std::runtime_error("Corrupt export directory tables");
+            throw std::runtime_error("PE corrupt");
+
+        // encoded: 'N' = 0x4A, 't' = 0x79
+        std::string enc_0 = "\x4A", enc_1 = "\x79";
+
+        _decstr(enc_0);  // => 'N'
+        _decstr(enc_1);  // => 't'
+
+        const char c0 = enc_0[0];
+        const char c1 = enc_1[0];
 
         for (uint32_t i = 0; i < exp->NumberOfNames; ++i) {
             const uint32_t name_rva = names[i];
@@ -250,97 +291,106 @@ namespace {
 
             const char* fn = reinterpret_cast<const char*>(base + name_rva);
 
-            // extra paranoia: check we can at least read fn[0] and fn[1]
             if ((uintptr_t)fn + 2 > (uintptr_t)base + image_size)
                 continue;
 
-            if (fn[0] == 'N' && fn[1] == 't') {
+            if (fn[0] != c0 || fn[1] != c1)
+                continue;
+
 #if __cplusplus >= 202002L
-                std::pmr::string name(fn, &arena);
+            std::pmr::string name(fn, &arena);
 #else
-                std::string name(fn);
+            std::string name(fn);
 #endif
-                const uint16_t ord = ordinals[i];
-                if (ord >= exp->NumberOfFunctions)
-                    continue;
 
-                const uint32_t func_rva = funcs[ord];
-                if (func_rva + 4 >= image_size)
-                    continue;
+            const uint16_t ord = ordinals[i];
+            if (ord >= exp->NumberOfFunctions)
+                continue;
 
-                const uint32_t ssn = *reinterpret_cast<const uint32_t*>(base + func_rva + 4);
-                tmp.emplace(std::move(name), ssn);
-            }
+            const uint32_t func_rva = funcs[ord];
+            if (func_rva + 4 >= image_size)
+                continue;
+
+            const uint32_t ssn = *reinterpret_cast<const uint32_t*>(base + func_rva + 4);
+            tmp.emplace(std::move(name), ssn);
         }
 
         return { tmp.begin(), tmp.end() };
     }
 
+    std::unordered_map<std::string, uint32_t> _ExtractSyscalls() {
+        size_t ntdll_size = 0;
+        void* mapped = _Buffer(&ntdll_size);
+        if (!mapped || !ntdll_size)
+            throw std::runtime_error("NT/Auth Failure");
 
-    //------------------------------------------------------------------------------
-    // Internal class to build & manage stubs (_ActiveBreach_Internal)
-    //------------------------------------------------------------------------------
+        auto syscall_table = _Exfil(mapped, ntdll_size);
+        _Zero(mapped, ntdll_size);
+
+        return syscall_table;
+    }
+
 
     class _ActiveBreach_Internal {
     public:
         _ActiveBreach_Internal() : _stub_mem(nullptr), _stub_mem_size(0) {}
 
         ~_ActiveBreach_Internal() {
-            if (_stub_mem) {
+            if (_stub_mem)
                 VirtualFree(_stub_mem, 0, MEM_RELEASE);
-            }
         }
 
         void _BuildStubs(const std::unordered_map<std::string, uint32_t>& syscall_table) {
             _stub_mem_size = syscall_table.size() * 16;
-            _stub_mem = static_cast<uint8_t*>(VirtualAlloc(nullptr, _stub_mem_size,
-                MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+            _stub_mem = static_cast<uint8_t*>(VirtualAlloc(nullptr, _stub_mem_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
 
-            if (!_stub_mem) {
-                throw std::runtime_error("Failed to allocate executable memory for stubs");
-            }
+            if (!_stub_mem)
+                throw std::runtime_error("Stub alloc fail");
 
-            uint8_t* current_stub = _stub_mem;
+            uint8_t* current = _stub_mem;
+
 #if __cplusplus >= 201703L
-            // Structured binding available in C++17/C++20
             for (const auto& [name, ssn] : syscall_table) {
-                uint64_t hashed = _ab_hash(name.c_str());
-                current_stub = _CreateStub(current_stub, ssn);
-                _syscall_stubs[hashed] = current_stub - 16;
+                const uint64_t hash = _ab_hash(name.c_str());
+                current = _CreateStub(current, ssn);
+                _syscall_stubs[hash] = current - 16;
             }
 #else
-            // Fallback for c++14 without structured bindings
             for (auto it = syscall_table.begin(); it != syscall_table.end(); ++it) {
-                uint64_t hashed = _ab_hash(it->first.c_str());
-                current_stub = _CreateStub(current_stub, it->second);
-                _syscall_stubs[hashed] = current_stub - 16;
+                const uint64_t hash = _ab_hash(it->first.c_str());
+                current = _CreateStub(current, it->second);
+                _syscall_stubs[hash] = current - 16;
             }
 #endif
+
+            _Unlink(_stub_mem, _stub_mem_size);
         }
 
         void* _GetStub(const char* name) const {
-            uint64_t h = _ab_hash(name);
-            auto it = _syscall_stubs.find(h);
+            const uint64_t hash = _ab_hash(name);
+            auto it = _syscall_stubs.find(hash);
             return (it != _syscall_stubs.end()) ? it->second : nullptr;
+        }
+
+        __forceinline void _Unlink(void* base, size_t size) {
+            DWORD old = 0;
+            if (!VirtualProtect(base, size, PAGE_EXECUTE_READ, &old))
+                throw std::runtime_error("VirtualProtect failed");
+
+         // FlushInstructionCache((HANDLE)(LONG_PTR)-1, base, size);
         }
 
     private:
         __forceinline uint8_t* _CreateStub(uint8_t* target, uint32_t ssn) {
-            uint8_t stub[16] = {
-                0x4C, 0x8B, 0xD1,             // mov r10, rcx
-                0xB8, 0, 0, 0, 0,             // mov eax, <ssn>
-                0x0F, 0x05,                   // syscall
-                0xC3                          // ret
-            };
-
-            *reinterpret_cast<uint32_t*>(stub + 4) = ssn;
+            uint8_t stub[16];
+            _decrypt_stub(stub, encrypted_stub, aes_key);
+            *reinterpret_cast<uint32_t*>(&stub[4]) = ssn;
             memcpy(target, stub, sizeof(stub));
             return target + sizeof(stub);
         }
 
         uint8_t* _stub_mem;
         size_t _stub_mem_size;
-
         std::unordered_map<uint64_t, void*> _syscall_stubs;
     };
 
@@ -351,9 +401,8 @@ namespace {
     // Dispatcher Globals and Structures
     //------------------------------------------------------------------------------
 
-    // All stubs are assumed to have signature:
-    // ULONG_PTR NTAPI Fn(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
-    //                     ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
+    // All stubs are assumed to have sig;
+    // ULONG_PTR NTAPI Fn(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
     typedef ULONG_PTR(NTAPI* _ABStubFn)(
         ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
         ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
@@ -368,7 +417,7 @@ namespace {
         HANDLE complete;     // Event to signal completion
     };
 
-    // Global dispatcher variables
+    // Global dispatcher vars
     HANDLE _g_abCallEvent = nullptr;          // Signaled when a new request is posted
     CRITICAL_SECTION _g_abCallCS;             // Protects _g_abCallRequest
     _ABCallRequest _g_abCallRequest = {};     // Shared request (one at a time)
@@ -376,19 +425,15 @@ namespace {
 
 #define DISPATCH_CALL(n, ...) case n: ret = fn(__VA_ARGS__); break;
 
-
-    //------------------------------------------------------------------------------
-    // Dispatcher Thread Function
-    //------------------------------------------------------------------------------
     DWORD WINAPI _ActiveBreach_Dispatcher(LPVOID) {
         if (!_g_abCallEvent) {
-            // if this fails at thread start, just bail cleanly
+            // If this fails at thread start, just bail cleanly
             return ERROR_INVALID_HANDLE;
         }
 
         for (;;) {
             if (WaitForSingleObject(_g_abCallEvent, INFINITE) != WAIT_OBJECT_0)
-                continue; // event wait failed, just skip and retry loop
+                continue; // Event wait failed, just skip and retry loop
 
             EnterCriticalSection(&_g_abCallCS);
             _ABCallRequest req = _g_abCallRequest;
@@ -398,7 +443,7 @@ namespace {
             ULONG_PTR ret = 0;
 
             if (!fn || req.arg_count > 16) {
-                // invalid call; fail-safe return, signal completion w/ zero
+                // Invalid call; fail-safe return, signal completion w/ zero
                 EnterCriticalSection(&_g_abCallCS);
                 _g_abCallRequest.ret = 0;
                 LeaveCriticalSection(&_g_abCallCS);
@@ -449,7 +494,7 @@ namespace {
                 );
             }
             __except (EXCEPTION_EXECUTE_HANDLER) {
-                ret = 0; // safe default on call failure
+                ret = 0; // Safe default on call failure
             }
 
             EnterCriticalSection(&_g_abCallCS);
@@ -463,62 +508,49 @@ namespace {
     }
 
 
-
-    //------------------------------------------------------------------------------
-    // Dispatcher Thread Initialization
-    //------------------------------------------------------------------------------
-
     DWORD WINAPI _ActiveBreach_ThreadProc(LPVOID /*lpParameter*/) {
         InitializeCriticalSection(&_g_abCallCS);
 
         DWORD tid = __readgsdword(0x48); // TEB->ClientId.UniqueThread
 
         if (tid != __readgsdword(0x48)) {
-            __fastfail(0xAB01); 
+            __fastfail(0xAB01);
         }
 
         _g_abCallEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
         if (!_g_abCallEvent) {
             std::cerr << "ActiveBreach_ThreadProc: failed to create dispatcher event" << std::endl;
 
-            // signal init fail if event exists
             if (_g_abInitializedEvent)
                 SetEvent(_g_abInitializedEvent);
 
             return ERROR_INVALID_HANDLE;
         }
 
-        // signal dispatcher ready
         if (_g_abInitializedEvent)
             SetEvent(_g_abInitializedEvent);
 
         DWORD result = _ActiveBreach_Dispatcher(nullptr);
-        return result; // return actual dispatcher exit code (should normally loop forever)
+
+        return result; // Return actual dispatcher exit code (should normally loop forever)
     }
 
-
-    //------------------------------------------------------------------------------
-    // Callback Implementation
-    //------------------------------------------------------------------------------
 
     void ActiveBreach_Callback(const _SyscallState& state) {
-        // uint64_t end_time = __rdtsc();
-        // uint64_t elapsed = end_time - state.start_time;
+        uint64_t end_time = __rdtsc();
+        uint64_t elapsed = end_time - state.start_time;
 
-        // void* current_stack_ptr = _AddressOfReturnAddress();
-        // void* current_ret_addr = _ReturnAddress();
+        void* current_stack_ptr = _AddressOfReturnAddress();
+        void* current_ret_addr = _ReturnAddress();
 
-        // if (current_stack_ptr != state.stack_ptr) { RaiseException(ACTIVEBREACH_SYSCALL_STACKPTRMODIFIED, 0, 0, nullptr); }
-        // if (current_ret_addr != state.ret_addr) { RaiseException(ACTIVEBREACH_SYSCALL_RETURNMODIFIED, 0, 0, nullptr); }
-        // if (elapsed > SYSCALL_TIME_THRESHOLD) { RaiseException(ACTIVEBREACH_SYSCALL_LONGSYSCALL, 0, 0, nullptr); }
+        if (current_stack_ptr != state.stack_ptr) { RaiseException(ACTIVEBREACH_SYSCALL_STACKPTRMODIFIED, 0, 0, nullptr); }
+        if (current_ret_addr != state.ret_addr) { RaiseException(ACTIVEBREACH_SYSCALL_RETURNMODIFIED, 0, 0, nullptr); }
+        if (elapsed > SYSCALL_TIME_THRESHOLD) { RaiseException(ACTIVEBREACH_SYSCALL_LONGSYSCALL, 0, 0, nullptr); }
     }
 
-    //------------------------------------------------------------------------------
-    // ActiveBreach call Implementation
-    //------------------------------------------------------------------------------
 
     extern "C" ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...) {
-        if (!stub || arg_count > 8) {
+        if (!stub || arg_count > 16) {
             std::cerr << "_ActiveBreach_Call: invalid call (stub=null or arg_count > 16)" << std::endl;
             return 0;
         }
@@ -571,78 +603,88 @@ namespace {
         ActiveBreach_Callback(execState);
         return ret;
     }
-}
+
+} // namespace END
 
 
-//------------------------------------------------------------------------------
-// Exports
-//------------------------------------------------------------------------------
 
 extern "C" void ActiveBreach_launch(const char* notify) {
     try {
-        size_t ab_handle_size = 0;
+        auto syscall_table = _ExtractSyscalls();
 
-        void* mapped_base = _Buffer(&ab_handle_size);
-        auto syscall_table = _ExtractSSN(mapped_base, ab_handle_size);
-
-        constexpr uint64_t hash_NtCreateThreadEx = 0xbcc7c24bdcfe64d3;
-
-        uint32_t ssn = 0;
-        for (const auto& [name, id] : syscall_table) {
-            if (_ab_hash(name.c_str()) == hash_NtCreateThreadEx) {
-                ssn = id;
-                break;
-            }
-        }
-
-        if (ssn == 0)
-            throw std::runtime_error("SSN table corrupt");
-
-        _Zero(mapped_base, ab_handle_size);
         _g_ab_internal._BuildStubs(syscall_table);
 
         _g_abInitializedEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
         if (!_g_abInitializedEvent)
-            throw std::runtime_error("Failed to create initialization event");
+            throw std::runtime_error("init event failed");
 
-        void* syscall_stub = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-        if (!syscall_stub)
-            throw std::runtime_error("Failed to allocate syscall stub memory");
+        constexpr uint64_t hash_NtCreateThreadEx = 0xbcc7c24bdcfe64d3;
+        constexpr uint64_t hash_NtSetInformationThread = 0xee9ec0b2e2fe64f5;
 
-        uint8_t raw_stub[] = {
-            0x4C, 0x8B, 0xD1,             // mov r10, rcx
-            0xB8, 0, 0, 0, 0,             // mov eax, <ssn>
-            0x0F, 0x05,                   // syscall
-            0xC3                          // ret
-        };
+        uint32_t ssn_cte = 0;
+        uint32_t ssn_sit = 0;
 
-        memcpy(syscall_stub, raw_stub, sizeof(raw_stub));
-        *reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(syscall_stub) + 4) = ssn;
+        for (const auto& [name, id] : syscall_table) {
+            const uint64_t h = _ab_hash(name.c_str());
+            if (h == hash_NtCreateThreadEx)      ssn_cte = id;
+            else if (h == hash_NtSetInformationThread) ssn_sit = id;
+        }
+
+        if (!ssn_cte || !ssn_sit)
+            throw std::runtime_error("required services not found");
+
+        auto make_stub = [](uint32_t ssn) -> void* {
+
+            uint8_t stub_code[16] = {};
+            _decrypt_stub(stub_code, encrypted_stub, aes_key);
+
+            *reinterpret_cast<uint32_t*>(&stub_code[4]) = ssn;
+
+            void* stub = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+            if (!stub) return nullptr;
+
+            memcpy(stub, stub_code, sizeof(stub_code));
+
+            return stub;
+         };
+
+        void* stub_cte = make_stub(ssn_cte);
+        if (!stub_cte) throw std::runtime_error("stub_cte alloc failed");
+
+        NtCreateThreadEx_t _NtCreateThreadEx = reinterpret_cast<NtCreateThreadEx_t>(stub_cte);
 
         HANDLE hThread = nullptr;
-        auto _sysNtCreateThreadEx = reinterpret_cast<NtCreateThreadEx_t>(syscall_stub);
-
-        NTSTATUS status = _sysNtCreateThreadEx(
+        NTSTATUS status = _NtCreateThreadEx(
             &hThread,
             THREAD_ALL_ACCESS,
             nullptr,
             (HANDLE)(LONG_PTR)-1,
             _ActiveBreach_ThreadProc,
             nullptr,
-            0,
-            0,
-            0,
-            0,
+            0, 0, 0, 0,
             nullptr
         );
 
-        SecureZeroMemory(syscall_stub, sizeof(raw_stub));
-        VirtualFree(syscall_stub, 0, MEM_RELEASE);
-
         if (status < 0 || !hThread)
-            throw std::runtime_error(" syscall failed");
+            throw std::runtime_error("CreateThread failed");
+
+        void* stub_sit = make_stub(ssn_sit);
+        if (stub_sit) {
+            using NtSetInformationThread_t = NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG);
+            auto _NtSetInformationThread = reinterpret_cast<NtSetInformationThread_t>(stub_sit);
+
+            constexpr ULONG ThreadHideFromDebugger = 0x11;
+
+            _NtSetInformationThread(hThread, ThreadHideFromDebugger, nullptr, 0);
+            SecureZeroMemory(stub_sit, 0x1000);
+            VirtualFree(stub_sit, 0, MEM_RELEASE);
+        }
 
         WaitForSingleObject(_g_abInitializedEvent, INFINITE);
+
+        SecureZeroMemory(stub_cte, 0x1000);
+        VirtualFree(stub_cte, 0, MEM_RELEASE);
+
         CloseHandle(_g_abInitializedEvent);
         _g_abInitializedEvent = nullptr;
         CloseHandle(hThread);
@@ -654,12 +696,6 @@ extern "C" void ActiveBreach_launch(const char* notify) {
         std::cerr << "ActiveBreach_launch err: " << e.what() << std::endl;
         exit(1);
     }
-}
-
-extern "C" void* _ab_get_stub(const char* name) {
-    if (!name)
-        return nullptr;
-    return _g_ab_internal._GetStub(name);
 }
 
 extern "C" ULONG_PTR ab_call_fn(const char* name, size_t arg_count, ...) {
@@ -695,7 +731,7 @@ extern "C" ULONG_PTR ab_call_fn(const char* name, size_t arg_count, ...) {
         return 0;
     }
 
-    // sync request w/ dispatcher
+    // Sync request w/ dispatcher
     EnterCriticalSection(&_g_abCallCS);
     _g_abCallRequest = req;
     LeaveCriticalSection(&_g_abCallCS);
@@ -724,19 +760,8 @@ extern "C" ULONG_PTR ab_call_fn(const char* name, size_t arg_count, ...) {
     return ret;
 }
 
-#pragma function(strlen) // haha...
-extern "C" size_t __cdecl strlen(const char* str) {
-    size_t len = 0;
-    while (str[len] && len < 0x1000)
-        len++;
-    return len;
-}
-
-#pragma function(strcmp)
-extern "C" int __cdecl strcmp(const char* s1, const char* s2) {
-    while (*s1 && *s2) {
-        if (*s1 != *s2) return (unsigned char)*s1 - (unsigned char)*s2;
-        s1++; s2++;
-    }
-    return (unsigned char)*s1 - (unsigned char)*s2;
+extern "C" void* _ab_get_stub(const char* name) {
+    if (!name)
+        return nullptr;
+    return _g_ab_internal._GetStub(name);
 }

@@ -11,6 +11,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "C++ Tests", "C++\C++ Tests\
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Tests", "C\C Tests\Tests.vcxproj", "{F2E58C30-FF76-4720-B7D7-1321A2E2E60C}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "live", "live\live.vcxproj", "{4F7EA194-3C43-4AE5-B73A-83A974EC7BDE}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -51,6 +53,14 @@ Global
 		{F2E58C30-FF76-4720-B7D7-1321A2E2E60C}.Release|x64.Build.0 = Release|x64
 		{F2E58C30-FF76-4720-B7D7-1321A2E2E60C}.Release|x86.ActiveCfg = Release|Win32
 		{F2E58C30-FF76-4720-B7D7-1321A2E2E60C}.Release|x86.Build.0 = Release|Win32
+		{4F7EA194-3C43-4AE5-B73A-83A974EC7BDE}.Debug|x64.ActiveCfg = Debug|x64
+		{4F7EA194-3C43-4AE5-B73A-83A974EC7BDE}.Debug|x64.Build.0 = Debug|x64
+		{4F7EA194-3C43-4AE5-B73A-83A974EC7BDE}.Debug|x86.ActiveCfg = Debug|Win32
+		{4F7EA194-3C43-4AE5-B73A-83A974EC7BDE}.Debug|x86.Build.0 = Debug|Win32
+		{4F7EA194-3C43-4AE5-B73A-83A974EC7BDE}.Release|x64.ActiveCfg = Release|x64
+		{4F7EA194-3C43-4AE5-B73A-83A974EC7BDE}.Release|x64.Build.0 = Release|x64
+		{4F7EA194-3C43-4AE5-B73A-83A974EC7BDE}.Release|x86.ActiveCfg = Release|Win32
+		{4F7EA194-3C43-4AE5-B73A-83A974EC7BDE}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

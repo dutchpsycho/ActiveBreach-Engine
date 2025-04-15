@@ -92,6 +92,21 @@ typedef struct _PS_ATTRIBUTE_LIST {
     PS_ATTRIBUTE Attributes[1];
 } PS_ATTRIBUTE_LIST, * PPS_ATTRIBUTE_LIST;
 
+typedef struct _PEB {
+    BYTE Reserved1[2];
+    BYTE BeingDebugged;
+    BYTE Reserved2[1];
+    PVOID Reserved3[2];
+    PVOID Ldr;
+    PVOID ProcessParameters;
+    BYTE Reserved4[104];
+    PVOID Reserved5[52];
+    PVOID PostProcessInitRoutine;
+    BYTE Reserved6[128];
+    PVOID Reserved7[1];
+    ULONG SessionId;
+} PEB, * PPEB;
+
 /*
  * ActiveBreach_launch:
  * Launches the global ActiveBreach handler
@@ -110,6 +125,9 @@ typedef struct _PS_ATTRIBUTE_LIST {
  * The caller supplies the NT func type and args
  * eg; NTSTATUS status = ab_call(NtQuerySystemInformation_t, "NtQuerySystemInformation", 5, buffer, buffer_size, &return_length);
 */
+
+static constexpr uint8_t encrypted_stub[16] = { 0x0D, 0xCA, 0x90, 0xF9, 0xEA, 0x8C, 0xAE, 0x40, 0x4E, 0x44, 0x82, 0x41, 0x41, 0x41, 0x41, 0x41 };
+static constexpr uint8_t aes_key[16] = { 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41 };
 
 #define ab_call(nt_type, name, ...) \
     ([]() -> nt_type { \
