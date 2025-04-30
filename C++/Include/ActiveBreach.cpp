@@ -35,7 +35,6 @@
 #include <string>
 #include <iostream>
 #include <cstring>
-#include <cstdarg>
 #include <unordered_map>
 
 #if __cplusplus >= 202002L
@@ -45,7 +44,9 @@
 #include <immintrin.h>
 #include <intrin.h>
 
+
 using NtCreateThreadEx_t = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, HANDLE, PVOID, PVOID, ULONG, SIZE_T, SIZE_T, SIZE_T, PPS_ATTRIBUTE_LIST);
+
 
 #pragma function(strlen)
 extern "C" size_t __cdecl strlen(const char* str) {
@@ -64,12 +65,35 @@ extern "C" int __cdecl strcmp(const char* s1, const char* s2) {
     return (unsigned char)*s1 - (unsigned char)*s2;
 }
 
+
 __forceinline void _decrypt_stub(uint8_t* out, const uint8_t* enc, const uint8_t* key) {
     for (int i = 0; i < 16; ++i)
         out[i] = enc[i] ^ key[i];
 }
 
+
 namespace {
+
+    // All stubs are assumed to have sig;
+    // ULONG_PTR NTAPI Fn(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
+    typedef ULONG_PTR(NTAPI* _ABStubFn)(
+        ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
+        ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
+        ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
+        ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
+
+    struct _ABCallRequest {
+        void* stub;
+        size_t arg_count;
+        ULONG_PTR args[16];
+        HANDLE complete;
+        ULONG_PTR ret;
+
+        _SyscallState state;
+    };
+
+    // Global dispatcher vars
+    HANDLE _g_abInitializedEvent = nullptr;   // Signaled when dispatcher thread is ready
 
     __forceinline bool _has_avx2() {
         int info[4];
@@ -94,12 +118,16 @@ namespace {
                 acc = _mm256_or_si256(acc, _mm256_slli_epi64(acc, 5));
                 acc = _mm256_sub_epi64(acc, _mm256_srli_epi64(acc, 3));
             }
+
             uint64_t h[4];
             _mm256_storeu_si256(reinterpret_cast<__m256i*>(h), acc);
+
             return h[0] ^ h[1] ^ h[2] ^ h[3] ^ seed;
         }
+
         else {
             __m128i acc = _mm_set1_epi64x(seed);
+
             for (size_t i = 0; i + 16 <= len; i += 16) {
                 __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(str + i));
                 acc = _mm_xor_si128(acc, chunk);
@@ -107,8 +135,10 @@ namespace {
                 acc = _mm_add_epi64(acc, _mm_srli_epi64(acc, 2));
                 acc = _mm_shuffle_epi8(acc, _mm_set_epi8(1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14));
             }
+
             uint64_t h[2];
             _mm_storeu_si128(reinterpret_cast<__m128i*>(h), acc);
+
             return h[0] ^ h[1] ^ seed;
         }
     }
@@ -150,6 +180,7 @@ namespace {
 
         wchar_t sysdir[MAX_PATH];
         wchar_t wide_env[MAX_PATH];
+
         size_t converted = 0;
 
         if (mbstowcs_s(&converted, wide_env, enc_env.c_str(), MAX_PATH) != 0)
@@ -200,6 +231,7 @@ namespace {
 
         SIZE_T full_size = nt->OptionalHeader.SizeOfImage;
         uint8_t* mapped = static_cast<uint8_t*>(VirtualAlloc(nullptr, full_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+
         if (!mapped) {
             VirtualFree(raw, 0, MEM_RELEASE);
             return nullptr;
@@ -233,12 +265,14 @@ namespace {
 
     std::unordered_map<std::string, uint32_t> _Exfil(void* mapped_base, size_t image_size) {
         static uint8_t ssn_pool[32 * 1024];
+
 #if __cplusplus >= 202002L
         std::pmr::monotonic_buffer_resource arena(ssn_pool, sizeof(ssn_pool));
         std::pmr::unordered_map<std::string, uint32_t> tmp(&arena);
 #else
         std::unordered_map<std::string, uint32_t> tmp;
 #endif
+
         tmp.reserve(512);
 
         const auto* base = static_cast<uint8_t*>(mapped_base);
@@ -270,12 +304,9 @@ namespace {
         const size_t ordinal_table_end = (uintptr_t)ordinals + sizeof(uint16_t) * exp->NumberOfNames;
         const size_t func_table_end = (uintptr_t)funcs + sizeof(uint32_t) * exp->NumberOfFunctions;
 
-        if (name_table_end > (uintptr_t)base + image_size ||
-            ordinal_table_end > (uintptr_t)base + image_size ||
-            func_table_end > (uintptr_t)base + image_size)
+        if (name_table_end > (uintptr_t)base + image_size || ordinal_table_end > (uintptr_t)base + image_size || func_table_end > (uintptr_t)base + image_size)
             throw std::runtime_error("PE corrupt");
 
-        // encoded: 'N' = 0x4A, 't' = 0x79
         std::string enc_0 = "\x4A", enc_1 = "\x79";
 
         _decstr(enc_0);  // => 'N'
@@ -312,6 +343,7 @@ namespace {
                 continue;
 
             const uint32_t ssn = *reinterpret_cast<const uint32_t*>(base + func_rva + 4);
+
             tmp.emplace(std::move(name), ssn);
         }
 
@@ -332,7 +364,9 @@ namespace {
 
 
     class _ActiveBreach_Internal {
+
     public:
+
         _ActiveBreach_Internal() : _stub_mem(nullptr), _stub_mem_size(0) {}
 
         ~_ActiveBreach_Internal() {
@@ -353,12 +387,14 @@ namespace {
             for (const auto& [name, ssn] : syscall_table) {
                 const uint64_t hash = _ab_hash(name.c_str());
                 current = _CreateStub(current, ssn);
+
                 _syscall_stubs[hash] = current - 16;
             }
 #else
             for (auto it = syscall_table.begin(); it != syscall_table.end(); ++it) {
                 const uint64_t hash = _ab_hash(it->first.c_str());
                 current = _CreateStub(current, it->second);
+
                 _syscall_stubs[hash] = current - 16;
             }
 #endif
@@ -369,11 +405,14 @@ namespace {
         void* _GetStub(const char* name) const {
             const uint64_t hash = _ab_hash(name);
             auto it = _syscall_stubs.find(hash);
+
             return (it != _syscall_stubs.end()) ? it->second : nullptr;
         }
 
         __forceinline void _Unlink(void* base, size_t size) {
+
             DWORD old = 0;
+
             if (!VirtualProtect(base, size, PAGE_EXECUTE_READ, &old))
                 throw std::runtime_error("VirtualProtect failed");
 
@@ -381,229 +420,77 @@ namespace {
         }
 
     private:
+
         __forceinline uint8_t* _CreateStub(uint8_t* target, uint32_t ssn) {
+
             uint8_t stub[16];
+
             _decrypt_stub(stub, encrypted_stub, aes_key);
             *reinterpret_cast<uint32_t*>(&stub[4]) = ssn;
             memcpy(target, stub, sizeof(stub));
+
             return target + sizeof(stub);
         }
 
         uint8_t* _stub_mem;
         size_t _stub_mem_size;
+
         std::unordered_map<uint64_t, void*> _syscall_stubs;
     };
 
     static _ActiveBreach_Internal _g_ab_internal;
 
 
-    //------------------------------------------------------------------------------
-    // Dispatcher Globals and Structures
-    //------------------------------------------------------------------------------
-
-    // All stubs are assumed to have sig;
-    // ULONG_PTR NTAPI Fn(ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
-    typedef ULONG_PTR(NTAPI* _ABStubFn)(
-        ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
-        ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
-        ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR,
-        ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG_PTR);
-
-    struct _ABCallRequest {
-        void* stub;          // Function pointer to call
-        size_t arg_count;    // Number of arguments (0..16)
-        ULONG_PTR args[16];  // Arguments (unused slots are 0)
-        ULONG_PTR ret;       // Return value (set by the dispatcher)
-        HANDLE complete;     // Event to signal completion
-    };
-
-    // Global dispatcher vars
-    HANDLE _g_abCallEvent = nullptr;          // Signaled when a new request is posted
-    CRITICAL_SECTION _g_abCallCS;             // Protects _g_abCallRequest
-    _ABCallRequest _g_abCallRequest = {};     // Shared request (one at a time)
-    HANDLE _g_abInitializedEvent = nullptr;   // Signaled when dispatcher thread is ready
-
-#define DISPATCH_CALL(n, ...) case n: ret = fn(__VA_ARGS__); break;
-
-    DWORD WINAPI _ActiveBreach_Dispatcher(LPVOID) {
-        if (!_g_abCallEvent) {
-            // If this fails at thread start, just bail cleanly
-            return ERROR_INVALID_HANDLE;
-        }
-
-        for (;;) {
-            if (WaitForSingleObject(_g_abCallEvent, INFINITE) != WAIT_OBJECT_0)
-                continue; // Event wait failed, just skip and retry loop
-
-            EnterCriticalSection(&_g_abCallCS);
-            _ABCallRequest req = _g_abCallRequest;
-            LeaveCriticalSection(&_g_abCallCS);
-
-            _ABStubFn fn = reinterpret_cast<_ABStubFn>(req.stub);
-            ULONG_PTR ret = 0;
-
-            if (!fn || req.arg_count > 16) {
-                // Invalid call; fail-safe return, signal completion w/ zero
-                EnterCriticalSection(&_g_abCallCS);
-                _g_abCallRequest.ret = 0;
-                LeaveCriticalSection(&_g_abCallCS);
-
-                SetEvent(req.complete);
-                continue;
-            }
-
-            alignas(32) ULONG_PTR padded[16];
-
-            if (_has_avx2()) {
-                __m256i zero = _mm256_setzero_si256();
-                _mm256_store_si256((__m256i*) & padded[0], zero);
-                _mm256_store_si256((__m256i*) & padded[4], zero);
-                _mm256_store_si256((__m256i*) & padded[8], zero);
-                _mm256_store_si256((__m256i*) & padded[12], zero);
-
-                if (req.arg_count > 0) {
-                    __m256i arg0 = _mm256_loadu_si256((__m256i*) & req.args[0]);
-                    _mm256_store_si256((__m256i*) & padded[0], arg0);
-                }
-                if (req.arg_count > 4) {
-                    __m256i arg1 = _mm256_loadu_si256((__m256i*) & req.args[4]);
-                    _mm256_store_si256((__m256i*) & padded[4], arg1);
-                }
-                if (req.arg_count > 8) {
-                    __m256i arg2 = _mm256_loadu_si256((__m256i*) & req.args[8]);
-                    _mm256_store_si256((__m256i*) & padded[8], arg2);
-                }
-                if (req.arg_count > 12) {
-                    __m256i arg3 = _mm256_loadu_si256((__m256i*) & req.args[12]);
-                    _mm256_store_si256((__m256i*) & padded[12], arg3);
-                }
-            }
-            else {
-                for (size_t i = 0; i < 16; ++i)
-                    padded[i] = 0;
-                for (size_t i = 0; i < req.arg_count; ++i)
-                    padded[i] = req.args[i];
-            }
-
-            __try {
-                ret = fn(
-                    padded[0], padded[1], padded[2], padded[3],
-                    padded[4], padded[5], padded[6], padded[7],
-                    padded[8], padded[9], padded[10], padded[11],
-                    padded[12], padded[13], padded[14], padded[15]
-                );
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) {
-                ret = 0; // Safe default on call failure
-            }
-
-            EnterCriticalSection(&_g_abCallCS);
-            _g_abCallRequest.ret = ret;
-            LeaveCriticalSection(&_g_abCallCS);
-
-            SetEvent(req.complete);
-        }
-
-        return 0;
-    }
-
-
-    DWORD WINAPI _ActiveBreach_ThreadProc(LPVOID /*lpParameter*/) {
-        InitializeCriticalSection(&_g_abCallCS);
-
-        DWORD tid = __readgsdword(0x48); // TEB->ClientId.UniqueThread
-
-        if (tid != __readgsdword(0x48)) {
-            __fastfail(0xAB01);
-        }
-
-        _g_abCallEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-        if (!_g_abCallEvent) {
-            std::cerr << "ActiveBreach_ThreadProc: failed to create dispatcher event" << std::endl;
-
-            if (_g_abInitializedEvent)
-                SetEvent(_g_abInitializedEvent);
-
-            return ERROR_INVALID_HANDLE;
-        }
-
-        if (_g_abInitializedEvent)
-            SetEvent(_g_abInitializedEvent);
-
-        DWORD result = _ActiveBreach_Dispatcher(nullptr);
-
-        return result; // Return actual dispatcher exit code (should normally loop forever)
-    }
-
-
     void ActiveBreach_Callback(const _SyscallState& state) {
         uint64_t end_time = __rdtsc();
         uint64_t elapsed = end_time - state.start_time;
 
-        void* current_stack_ptr = _AddressOfReturnAddress();
+#if 0
+        void* current_stack_ptr = _AddressOfReturnAddress(); // dead
         void* current_ret_addr = _ReturnAddress();
 
         if (current_stack_ptr != state.stack_ptr) { RaiseException(ACTIVEBREACH_SYSCALL_STACKPTRMODIFIED, 0, 0, nullptr); }
         if (current_ret_addr != state.ret_addr) { RaiseException(ACTIVEBREACH_SYSCALL_RETURNMODIFIED, 0, 0, nullptr); }
-        if (elapsed > SYSCALL_TIME_THRESHOLD) { RaiseException(ACTIVEBREACH_SYSCALL_LONGSYSCALL, 0, 0, nullptr); }
+#endif
+
+        if (elapsed > SYSCALL_TIME_THRESHOLD) {
+            RaiseException(ACTIVEBREACH_SYSCALL_LONGSYSCALL, 0, 0, nullptr);
+        }
     }
 
 
-    extern "C" ULONG_PTR _ActiveBreach_Call(void* stub, size_t arg_count, ...) {
-        if (!stub || arg_count > 16) {
-            std::cerr << "_ActiveBreach_Call: invalid call (stub=null or arg_count > 16)" << std::endl;
-            return 0;
+    VOID CALLBACK _ActiveBreach_TPWork(PTP_CALLBACK_INSTANCE /*Instance*/, PVOID Context, PTP_WORK /*Work*/) {
+        auto* req = static_cast<_ABCallRequest*>(Context);
+
+        alignas(32) ULONG_PTR padded[16] = {};
+        for (size_t i = 0; i < req->arg_count && i < 16; ++i)
+            padded[i] = req->args[i];
+
+        ULONG_PTR ret = 0;
+        auto fn = reinterpret_cast<_ABStubFn>(req->stub);
+
+        __try {
+            ret = fn(
+                padded[0], padded[1], padded[2], padded[3], padded[4], padded[5], padded[6], padded[7], padded[8], padded[9], padded[10], padded[11], padded[12], padded[13], padded[14], padded[15]
+            );
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            ret = 0;
         }
 
-        _SyscallState execState;
-        execState.start_time = __rdtsc();
-        execState.stack_ptr = _AddressOfReturnAddress();
-        execState.ret_addr = _ReturnAddress();
+        req->ret = ret;
+        ActiveBreach_Callback(req->state);
+        SetEvent(req->complete);
 
-        _ABCallRequest req = {};
-        req.stub = stub;
-        req.arg_count = arg_count;
-
-        va_list vl;
-        va_start(vl, arg_count);
-        for (size_t i = 0; i < arg_count; ++i)
-            req.args[i] = va_arg(vl, ULONG_PTR);
-        va_end(vl);
-
-        req.complete = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-        if (!req.complete) {
-            std::cerr << "_ActiveBreach_Call: failed to create completion event" << std::endl;
-            return 0;
-        }
-
-        EnterCriticalSection(&_g_abCallCS);
-        _g_abCallRequest = req;
-        LeaveCriticalSection(&_g_abCallCS);
-
-        if (_g_abCallEvent)
-            SetEvent(_g_abCallEvent);
-        else {
-            std::cerr << "_ActiveBreach_Call: dispatcher event is missing" << std::endl;
-            CloseHandle(req.complete);
-            return 0;
-        }
-
-        DWORD wait_result = WaitForSingleObject(req.complete, 5000);
-        CloseHandle(req.complete);
-
-        if (wait_result != WAIT_OBJECT_0) {
-            std::cerr << "_ActiveBreach_Call: dispatch wait failed (" << wait_result << ")" << std::endl;
-            return 0;
-        }
-
-        EnterCriticalSection(&_g_abCallCS);
-        ULONG_PTR ret = _g_abCallRequest.ret;
-        LeaveCriticalSection(&_g_abCallCS);
-
-        ActiveBreach_Callback(execState);
-        return ret;
+        delete req;
     }
 
+
+    DWORD WINAPI _ActiveBreach_ThreadProc(LPVOID) {
+        if (_g_abInitializedEvent)
+            SetEvent(_g_abInitializedEvent);
+        return 0;
+    }
 } // namespace END
 
 
@@ -686,12 +573,15 @@ extern "C" void ActiveBreach_launch(const char* notify) {
         VirtualFree(stub_cte, 0, MEM_RELEASE);
 
         CloseHandle(_g_abInitializedEvent);
+
         _g_abInitializedEvent = nullptr;
+
         CloseHandle(hThread);
 
         if (notify && strcmp(notify, "LMK") == 0)
             std::cout << "[AB] ACTIVEBREACH OPERATIONAL" << std::endl;
     }
+
     catch (const std::exception& e) {
         std::cerr << "ActiveBreach_launch err: " << e.what() << std::endl;
         exit(1);
@@ -699,65 +589,42 @@ extern "C" void ActiveBreach_launch(const char* notify) {
 }
 
 extern "C" ULONG_PTR ab_call_fn(const char* name, size_t arg_count, ...) {
-    if (!name || arg_count > 16) {
-        std::cerr << "ab_call_fn: invalid input (null name or arg_count > 16)" << std::endl;
-        return 0;
-    }
+    if (!name || arg_count > 16) return 0;
 
     void* stub = _g_ab_internal._GetStub(name);
-    if (!stub) {
-        std::cerr << "ab_call_fn: stub not found for '" << name << "'" << std::endl;
-        return 0;
-    }
+    if (!stub) return 0;
 
-    _SyscallState execState;
-    execState.start_time = __rdtsc();
-    execState.stack_ptr = _AddressOfReturnAddress();
-    execState.ret_addr = _ReturnAddress();
+    auto* req = new _ABCallRequest{};
+    req->stub = stub;
+    req->arg_count = arg_count;
+    req->complete = CreateEvent(nullptr, TRUE, FALSE, nullptr);
 
-    _ABCallRequest req = {};
-    req.stub = stub;
-    req.arg_count = arg_count;
+    req->state.start_time = __rdtsc();
+    req->state.stack_ptr = _AddressOfReturnAddress();
+    req->state.ret_addr = _ReturnAddress();
 
     va_list vl;
+
     va_start(vl, arg_count);
     for (size_t i = 0; i < arg_count; ++i)
-        req.args[i] = va_arg(vl, ULONG_PTR);
+        req->args[i] = va_arg(vl, ULONG_PTR);
     va_end(vl);
 
-    req.complete = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-    if (!req.complete) {
-        std::cerr << "ab_call_fn: failed to create completion event" << std::endl;
+    auto work = CreateThreadpoolWork(_ActiveBreach_TPWork, req, nullptr);
+    if (!work) {
+        CloseHandle(req->complete);
+        delete req;
         return 0;
     }
 
-    // Sync request w/ dispatcher
-    EnterCriticalSection(&_g_abCallCS);
-    _g_abCallRequest = req;
-    LeaveCriticalSection(&_g_abCallCS);
+    SubmitThreadpoolWork(work);
 
-    if (_g_abCallEvent)
-        SetEvent(_g_abCallEvent);
-    else {
-        std::cerr << "ab_call_fn: dispatcher event handle missing" << std::endl;
-        CloseHandle(req.complete);
-        return 0;
-    }
+    DWORD wait = WaitForSingleObject(req->complete, 5000);
 
-    DWORD wait_result = WaitForSingleObject(req.complete, 5000); // 5s timeout to prevent hangs
-    CloseHandle(req.complete);
+    CloseHandle(req->complete);
+    CloseThreadpoolWork(work);
 
-    if (wait_result != WAIT_OBJECT_0) {
-        std::cerr << "ab_call_fn: wait timeout or error (" << wait_result << ")" << std::endl;
-        return 0;
-    }
-
-    EnterCriticalSection(&_g_abCallCS);
-    ULONG_PTR ret = _g_abCallRequest.ret;
-    LeaveCriticalSection(&_g_abCallCS);
-
-    ActiveBreach_Callback(execState);
-    return ret;
+    return (wait == WAIT_OBJECT_0) ? req->ret : 0;
 }
 
 extern "C" void* _ab_get_stub(const char* name) {
