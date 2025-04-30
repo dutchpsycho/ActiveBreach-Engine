@@ -111,7 +111,7 @@ test    byte ptr ds:[0x7FFE0308], 1
 jnz     fallback
 syscall
 ret
-```does 
+```
 
 We don't need the KUSER bit-check, we can use a minimal prologue that skips it (What ActiveBreach uses)
 
