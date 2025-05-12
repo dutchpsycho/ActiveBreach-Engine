@@ -2,11 +2,9 @@
 
 ## Project Overview  
 
-**ActiveBreach Engine** is an open-source offensive security research initiative by **TITAN Softwork Solutions**, designed for invisible driverless syscall execution under EDR/AntiCheat protected environments.  
+**ActiveBreach Engine** is an open-source offensive security research project developed under the **TITAN Softwork Solutions** collective, designed for undetectable syscall execution under AC/AV/EDR protected environments.  
 
-Originally inspired by foundational work from [MDSEC](https://www.mdsec.co.uk/2020/12/bypassing-user-mode-hooks-and-direct-invocation-of-system-calls-for-red-teams/), **SysWhispers**, and **Hell’s Gate**, this framework pushes beyond basic syscall generation by implementing a fully dynamic, runtime-generated dispatcher — purpose-built for evading usermode API hooks and sidestepping kernel-level security.
-
-This is not a wrapper. This is not a loader. This is a syscall engine tied directly into memory, resolving, constructing, and dispatching calls with no static linkage or conventional API usage.
+Inspired by [MDSEC](https://www.mdsec.co.uk/2020/12/bypassing-user-mode-hooks-and-direct-invocation-of-system-calls-for-red-teams/), **SysWhispers**, and **Hell’s Gate**. This framework expands on their foundational concepts by going beyond hardcoded syscall lists — implementing a full execution pipeline with dynamic stub generation, proper memory management, runtime encryption, and modern code.
 
 ---
 
@@ -18,17 +16,68 @@ Most public syscall tooling falls into one of two buckets:
    Nuking all usermode protections via page remapping or ntdll restoration. Effective short-term — but loud, risky, and easily behaviorally profiled by modern EDRs/AC's.
 
 2. **Static Stub Patching:**  
-   Embedding syscall stubs inline. Fast, but fragile. Prone to detection through memory scanning or signature-based heuristics.
+   Embedding syscall stubs inline. Fast, but fragile. Prone to detection through simple memory scanning or sig-based heuristics.
 
 ---
 
 **ActiveBreach Engine** was built on a third principle:
 
-> *“If usermode is compromised, don't fix it — route around it.”*
+> *“Sidestep.”*
 
-Rather than restoring overwritten memory, touching hooks or accessing the kernel, ActiveBreach extracts SSN's from a clean memory copy of `ntdll.dll`, builds ephemeral execution stubs in dynamically allocated memory, and proxies all execution through an isolated, internal unlinked dispatcher thread. All syscall interactions are memory-local, thread-isolated, and AV-opaque.
+Rather than restoring overwritten memory, touching hooks or exploiting the kernel, ActiveBreach extracts SSN's from a clean memory copy of `ntdll.dll`, builds ephemeral execution stubs in dynamically allocated memory, and proxies all execution through an isolated, internal unlinked dispatcher thread. All syscall interactions are memory-local, thread-isolated, and AV-opaque. Rust crate also encrypts stubs at rest.
 
-Oh yeah, this also doesn't expose any Nt* or ntdll.dll strings, we use hashes.
+Oh yeah, this also doesn't expose any Nt* or ntdll.dll strings, they're encrypted, encoded or hashed.
+
+---
+
+### ActiveBreach Language Implementations
+
+#### C Edition — *"Baremetal"*
+
+* Designed for minimalism, portability, and raw Windows compatibility
+* Syscall stubs are constructed in-place without any encryption
+* Dispatcher runs on a single internal thread via `CreateThread`
+* No STL or CRT dependencies — pure WinAPI
+* Ideal for small implants, loaders, or low-footprint tools
+
+---
+
+#### C++ Edition — *"Enhanced"*
+
+* Implements a dynamic syscall stub manager with hash-based lookup
+* Encrypted syscall stubs are stored in the binary and decrypted on runtime
+* Uses STL containers or `std::pmr` for optimal mem allocation under C++20
+* Syscall dispatcher is threadpool-backed via `TP_CALLBACK_INSTANCE`, not a fixed thread
+* Exception-safe, fully encapsulated in `_ActiveBreach_Internal`
+* Compatible with C++14 and C++20
+* Great for full-featured EDR bypass modules or internal framework integration
+* Fastest execution model
+
+---
+
+#### Rust Edition — *"Advanced"*
+
+* Constructs syscall stubs dynamically at runtime, uses a ring-based stub management system
+* Single threaded, fast due to spinlock system
+* Least context switches between userland & kernel
+* Syscall stubs are encrypted in-memory with a signatureless LEA implementation
+* Designed for seamless integration into Rust-native malware frameworks or red team tools
+* Securest & stealthies
+* Largest footprint
+
+---
+
+
+| Feature                 | C                | C++                        | Rust                        |
+| ----------------------- | ---------------- | -------------------------- | --------------------------- |
+| Thread Model            | Single Thread    | Threadpool Dispatcher      | Single Thread (Fast)        |
+| Stub Encryption on Disk | None             | Yes (decrypted at runtime) | Semi (LLVM)                 |
+| Runtime Stub Encryption | None             | No                         | Yes                         |
+| String Encoding         | No               | Yes                        | Yes                         |
+| STL/CRT Dependency      | No               | Yes (`std`/`pmr`)          | Yes                         |
+| Invocation              | `ab_call_func()` | `ab_call_fn()`             | `ab_call()` (FFI or native) |
+| Deployment              | Header + Source  | Header + Source            | Crate                       |
+| Language Target         | C                | C++14 / C++20              | Rust 1.75+                  |
 
 ---
 
