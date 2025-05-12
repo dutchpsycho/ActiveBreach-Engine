@@ -1,0 +1,23 @@
+=== Benchmark Summary ===
+Syscall                    Native ms        AB ms     Overhead         Runs
+NtQueryInformationThread(Low)      0.233       14.861      6283.5%         1000
+NtQueryInformationProcess(Low)      0.208       14.882      7044.6%         1000
+NtSetInformationThread(Low)      0.159       15.984      9927.9%         1000
+NtDelayExecution(Low)          0.181       15.118      8252.4%         1000
+NtClose(Low)                   0.189       16.000      8347.7%         1000
+NtDuplicateObject(Low)         0.414       17.011      4005.0%         1000
+NtOpenThread(Low)              0.752       16.263      2061.5%         1000
+NtQueryInformationThread(Medium)      2.329      179.852      7623.3%        10000
+NtQueryInformationProcess(Medium)      2.158      153.756      7024.6%        10000
+NtSetInformationThread(Medium)      1.528      164.611     10670.8%        10000
+NtDelayExecution(Medium)       1.853      170.518      9102.7%        10000
+NtClose(Medium)                1.499      197.250     13062.3%        10000
+NtDuplicateObject(Medium)      4.257      186.207      4273.9%        10000
+NtOpenThread(Medium)           9.313      178.358      1815.2%        10000
+NtQueryInformationThread(High)     19.158     1558.795      8036.5%       100000
+NtQueryInformationProcess(High)     21.711     1509.631      6853.4%       100000
+NtSetInformationThread(High)     14.375     1427.926      9833.7%       100000
+NtDelayExecution(High)        13.698     1330.983      9616.7%       100000
+NtClose(High)                 13.265     1355.938     10122.2%       100000
+NtDuplicateObject(High)       27.642     1415.893      5022.3%       100000
+NtOpenThread(High)            76.921     1435.515      1766.2%       100000

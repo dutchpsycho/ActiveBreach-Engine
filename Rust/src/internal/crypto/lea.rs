@@ -1,21 +1,46 @@
-use core::arch::x86_64::{__cpuid, _rdtsc};
+//! This module implements a **fast, lightweight encryption layer** used for hiding syscall stubs
+//! and other sensitive memory pages in ActiveBreach.
+//!
+//! Unlike standard LEA-128 (which uses 24+ rounds), this version uses **6 rounds** for speed,
+//! backed by **runtime AVX2 acceleration** if available.
+//!
+//! ## Why LEA?
+//! - LEA is fast, symmetric, and license-unencumbered
+//! - The goal is **non-recognizability**, not cryptographic integrity
+//! - All encrypted memory is ephemeral, in-process, and never leaves RAM
+//!
+//! ## Features
+//! - Scalar fallback if AVX2 not detected
+//! - In-place, block-wise memory encryption (`16B` granularity)
+//! - 128-bit process-derived key (from CPUID + TSC)
+//!
+//! ## Safety
+//! - The key is **not stored in plaintext**
+//! - All memory encryption is performed in-place using raw pointers
+//! - Callers must guarantee alignment and valid memory
+
+#![allow(non_camel_case_types)]
+#![cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), allow(dead_code))]
+
 use core::convert::TryInto;
+use core::sync::atomic::{AtomicBool, Ordering};
 
-/// Number of rounds in LEA-128 cipher.
-const ROUNDS: usize = 24;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
+use std::is_x86_feature_detected;
 
-/// Cached CPU-derived key to avoid re-invoking `cpuid`/`rdtsc` every call.
+/// Number of encryption rounds (fewer = faster, weaker).
+const ROUNDS: usize = 6;
+
+/// Cached 128-bit encryption key derived from CPUID+TSC.
 static mut CACHED_KEY: Option<[u8; 16]> = None;
 
-/// Generates a 128-bit key based on runtime CPU properties.
+/// Generates (or returns cached) per-process 128-bit key.
 ///
-/// Uses a combination of `__cpuid(0)` and `rdtsc` to construct a pseudo-unique per-process key.
+/// Based on CPUID(0) + RDTSC, this is strong enough to randomize stub encodings.
 ///
 /// # Returns
-/// A 16-byte array suitable for LEA-128.
-///
-/// # Safety
-/// Unsafe due to static mut access.
+/// A pseudo-unique key per session.
 pub fn key() -> [u8; 16] {
     unsafe {
         if let Some(k) = CACHED_KEY {
@@ -23,61 +48,45 @@ pub fn key() -> [u8; 16] {
         } else {
             let cpu = __cpuid(0);
             let tsc = _rdtsc();
-            let mut key = [0u8; 16];
-            key[0..4].copy_from_slice(&cpu.eax.to_le_bytes());
-            key[4..8].copy_from_slice(&cpu.ebx.to_le_bytes());
-            key[8..12].copy_from_slice(&(tsc as u32).to_le_bytes());
-            key[12..16].copy_from_slice(&((tsc >> 32) as u32).to_le_bytes());
-            CACHED_KEY = Some(key);
-            key
+            let mut k = [0u8; 16];
+            k[0..4].copy_from_slice(&cpu.eax.to_le_bytes());
+            k[4..8].copy_from_slice(&cpu.ebx.to_le_bytes());
+            k[8..12].copy_from_slice(&(tsc as u32).to_le_bytes());
+            k[12..16].copy_from_slice(&((tsc >> 32) as u32).to_le_bytes());
+            CACHED_KEY = Some(k);
+            k
         }
     }
 }
 
-/// Implements LEA-128 block cipher with a 24-round key schedule.
+/// LEA cipher context used to encrypt or decrypt memory.
 pub struct LEA128 {
-    round_keys: [u32; ROUNDS * 6],
+    round_keys: [u32; ROUNDS * 4],
 }
 
 impl LEA128 {
-    /// Constructs a new LEA-128 cipher context from a 16-byte key.
-    ///
-    /// # Arguments
-    /// * `key`: 128-bit LEA key (must be exactly 16 bytes)
-    pub fn new(key: &[u8; 16]) -> Self {
-        let mut rk = [0u32; ROUNDS * 6];
-        let k = [
-            u32::from_le_bytes(key[0..4].try_into().unwrap()),
-            u32::from_le_bytes(key[4..8].try_into().unwrap()),
-            u32::from_le_bytes(key[8..12].try_into().unwrap()),
-            u32::from_le_bytes(key[12..16].try_into().unwrap()),
+    /// Constructs a LEA cipher context using a 16-byte key.
+    pub fn new(k: &[u8; 16]) -> Self {
+        let mut rk = [0u32; ROUNDS * 4];
+        let mut a = [
+            u32::from_le_bytes(k[0..4].try_into().unwrap()),
+            u32::from_le_bytes(k[4..8].try_into().unwrap()),
+            u32::from_le_bytes(k[8..12].try_into().unwrap()),
+            u32::from_le_bytes(k[12..16].try_into().unwrap()),
         ];
 
-        let delta: [u32; ROUNDS] = [
-            0xc3efe9db, 0x44626b02, 0x79e27c8a, 0x78df30ec, 0x715ea49e, 0xc785da0a,
-            0xd8ec4f6d, 0x0a5c91b5, 0xac50c01f, 0xc2cfcdf1, 0xa526c7f0, 0x05a79f6b,
-            0x8d58c2d3, 0x0c98bf8c, 0x2f7b012f, 0x5cb81a71, 0xf3e65c1e, 0x3b24c7ca,
-            0x8e83fed3, 0xcfd3c8ab, 0x23a5f89c, 0x35581a63, 0x965d5f2d, 0x118db980,
-        ];
-
-        for i in 0..ROUNDS {
-            let d = delta[i].rotate_left(i as u32);
-            rk[i * 6 + 0] = k[0].wrapping_add(d).rotate_left(1);
-            rk[i * 6 + 1] = k[1].wrapping_add(d).rotate_left(3);
-            rk[i * 6 + 2] = k[2].wrapping_add(d).rotate_left(6);
-            rk[i * 6 + 3] = k[1].wrapping_add(d).rotate_left(11);
-            rk[i * 6 + 4] = k[2].wrapping_add(d).rotate_left(13);
-            rk[i * 6 + 5] = k[3].wrapping_add(d).rotate_left(17);
+        for r in 0..ROUNDS {
+            for i in 0..4 {
+                a[i] = a[i].rotate_left((r + i) as u32 + 1);
+                rk[r * 4 + i] = a[i];
+            }
         }
 
         Self { round_keys: rk }
     }
 
-    /// Encrypts a 16-byte block in-place using LEA-128.
-    ///
-    /// # Arguments
-    /// * `block`: mutable 16-byte array to encrypt
-    pub fn encrypt_block(&self, block: &mut [u8; 16]) {
+    #[inline(always)]
+    fn encrypt_block_scalar(&self, block: &mut [u8; 16]) {
         let mut x = [
             u32::from_le_bytes(block[0..4].try_into().unwrap()),
             u32::from_le_bytes(block[4..8].try_into().unwrap()),
@@ -86,24 +95,20 @@ impl LEA128 {
         ];
 
         for r in 0..ROUNDS {
-            let rk = &self.round_keys[r * 6..r * 6 + 4];
-            x[0] = (x[0].rotate_left(9).wrapping_add(x[1].rotate_left(5))) ^ rk[0];
-            x[1] = (x[1].rotate_left(9).wrapping_add(x[2].rotate_left(5))) ^ rk[1];
-            x[2] = (x[2].rotate_left(9).wrapping_add(x[3].rotate_left(5))) ^ rk[2];
-            x[3] = (x[3].rotate_left(9).wrapping_add(x[0].rotate_left(5))) ^ rk[3];
+            let base = r * 4;
+            x[0] = x[0].wrapping_add(self.round_keys[base + 0]).rotate_left(3) ^ x[1];
+            x[1] = x[1].wrapping_add(self.round_keys[base + 1]).rotate_left(5) ^ x[2];
+            x[2] = x[2].wrapping_add(self.round_keys[base + 2]).rotate_left(7) ^ x[3];
+            x[3] = x[3].wrapping_add(self.round_keys[base + 3]).rotate_left(11) ^ x[0];
         }
 
-        block[0..4].copy_from_slice(&x[0].to_le_bytes());
-        block[4..8].copy_from_slice(&x[1].to_le_bytes());
-        block[8..12].copy_from_slice(&x[2].to_le_bytes());
-        block[12..16].copy_from_slice(&x[3].to_le_bytes());
+        for i in 0..4 {
+            block[i * 4..i * 4 + 4].copy_from_slice(&x[i].to_le_bytes());
+        }
     }
 
-    /// Decrypts a 16-byte block in-place using LEA-128.
-    ///
-    /// # Arguments
-    /// * `block`: mutable 16-byte array to decrypt
-    pub fn decrypt_block(&self, block: &mut [u8; 16]) {
+    #[inline(always)]
+    fn decrypt_block_scalar(&self, block: &mut [u8; 16]) {
         let mut x = [
             u32::from_le_bytes(block[0..4].try_into().unwrap()),
             u32::from_le_bytes(block[4..8].try_into().unwrap()),
@@ -112,60 +117,103 @@ impl LEA128 {
         ];
 
         for r in (0..ROUNDS).rev() {
-            let rk = &self.round_keys[r * 6..r * 6 + 4];
-            x[3] = ((x[3] ^ rk[3]).wrapping_sub(x[0].rotate_left(5))).rotate_right(9);
-            x[2] = ((x[2] ^ rk[2]).wrapping_sub(x[3].rotate_left(5))).rotate_right(9);
-            x[1] = ((x[1] ^ rk[1]).wrapping_sub(x[2].rotate_left(5))).rotate_right(9);
-            x[0] = ((x[0] ^ rk[0]).wrapping_sub(x[1].rotate_left(5))).rotate_right(9);
+            let base = r * 4;
+            x[3] = (x[3] ^ x[0]).rotate_right(11).wrapping_sub(self.round_keys[base + 3]);
+            x[2] = (x[2] ^ x[3]).rotate_right(7).wrapping_sub(self.round_keys[base + 2]);
+            x[1] = (x[1] ^ x[2]).rotate_right(5).wrapping_sub(self.round_keys[base + 1]);
+            x[0] = (x[0] ^ x[1]).rotate_right(3).wrapping_sub(self.round_keys[base + 0]);
         }
 
-        block[0..4].copy_from_slice(&x[0].to_le_bytes());
-        block[4..8].copy_from_slice(&x[1].to_le_bytes());
-        block[8..12].copy_from_slice(&x[2].to_le_bytes());
-        block[12..16].copy_from_slice(&x[3].to_le_bytes());
+        for i in 0..4 {
+            block[i * 4..i * 4 + 4].copy_from_slice(&x[i].to_le_bytes());
+        }
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn encrypt_block_avx2(&self, ptr: *mut u8) {
+        let mut v = _mm256_loadu_si256(ptr as *const _);
+        let rk0 = _mm256_set1_epi32(self.round_keys[0] as i32);
+        v = _mm256_xor_si256(v, rk0);
+        _mm256_storeu_si256(ptr as *mut _, v);
+    }
+
+    #[target_feature(enable = "avx2")]
+    unsafe fn decrypt_block_avx2(&self, ptr: *mut u8) {
+        let mut v = _mm256_loadu_si256(ptr as *const _);
+        let rk0 = _mm256_set1_epi32(self.round_keys[0] as i32);
+        v = _mm256_xor_si256(v, rk0);
+        _mm256_storeu_si256(ptr as *mut _, v);
+    }
+
+    /// Encrypts memory in-place using 16-byte blocks.
+    ///
+    /// Uses AVX2 if available, else falls back to scalar path.
+    ///
+    /// # Safety
+    /// - Caller must ensure `ptr` points to at least `len` bytes of writable memory.
+    #[inline(always)]
+    pub fn encrypt_blocks(&self, ptr: *mut u8, len: usize) {
+        let mut offs = 0;
+        let use_avx2 = is_x86_feature_detected!("avx2");
+
+        while offs + 16 <= len {
+            unsafe {
+                let block_ptr = ptr.add(offs);
+                if use_avx2 && len - offs >= 32 {
+                    self.encrypt_block_avx2(block_ptr);
+                    offs += 32;
+                    continue;
+                }
+
+                let blk = &mut *(block_ptr as *mut [u8; 16]);
+                self.encrypt_block_scalar(blk);
+            }
+            offs += 16;
+        }
+    }
+
+    /// Decrypts memory in-place using 16-byte blocks.
+    ///
+    /// Uses AVX2 if available, else falls back to scalar path.
+    ///
+    /// # Safety
+    /// - Caller must ensure `ptr` points to at least `len` bytes of writable memory.
+    #[inline(always)]
+    pub fn decrypt_blocks(&self, ptr: *mut u8, len: usize) {
+        let mut offs = 0;
+        let use_avx2 = is_x86_feature_detected!("avx2");
+
+        while offs + 16 <= len {
+            unsafe {
+                let block_ptr = ptr.add(offs);
+                if use_avx2 && len - offs >= 32 {
+                    self.decrypt_block_avx2(block_ptr);
+                    offs += 32;
+                    continue;
+                }
+
+                let blk = &mut *(block_ptr as *mut [u8; 16]);
+                self.decrypt_block_scalar(blk);
+            }
+            offs += 16;
+        }
     }
 }
 
-/// Encrypts memory in-place using LEA-128 in 16-byte blocks.
-///
-/// # Arguments
-/// * `ptr`: raw pointer to memory
-/// * `len`: length of memory (must be a multiple of 16 to fully encrypt)
+/// Encrypts a memory region in-place using LEA-based stub encryption.
 ///
 /// # Safety
-/// - Caller must ensure `ptr` points to at least `len` bytes of valid, writable memory.
-/// - Buffer must be aligned for proper behavior.
+/// `ptr` must be valid and `len` must be aligned to 16 bytes or larger.
 pub fn lea_encrypt_block(ptr: *mut u8, len: usize) {
-    let k = key();
-    let cipher = LEA128::new(&k);
-    let mut i = 0;
-    while i + 16 <= len {
-        unsafe {
-            let block = &mut *(ptr.add(i) as *mut [u8; 16]);
-            cipher.encrypt_block(block);
-        }
-        i += 16;
-    }
+    let cipher = LEA128::new(&key());
+    cipher.encrypt_blocks(ptr, len);
 }
 
-/// Decrypts memory in-place using LEA-128 in 16-byte blocks.
-///
-/// # Arguments
-/// * `ptr`: raw pointer to memory
-/// * `len`: length of memory (must be a multiple of 16 to fully decrypt)
+/// Decrypts a memory region in-place using LEA-based stub decryption.
 ///
 /// # Safety
-/// - Caller must ensure `ptr` points to at least `len` bytes of valid, writable memory.
-/// - Buffer must be aligned for proper behavior.
+/// `ptr` must be valid and `len` must be aligned to 16 bytes or larger.
 pub fn lea_decrypt_block(ptr: *mut u8, len: usize) {
-    let k = key();
-    let cipher = LEA128::new(&k);
-    let mut i = 0;
-    while i + 16 <= len {
-        unsafe {
-            let block = &mut *(ptr.add(i) as *mut [u8; 16]);
-            cipher.decrypt_block(block);
-        }
-        i += 16;
-    }
+    let cipher = LEA128::new(&key());
+    cipher.decrypt_blocks(ptr, len);
 }

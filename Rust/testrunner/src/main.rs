@@ -3,8 +3,33 @@
 
 //! # ActiveBreach Overhead Tester
 //!
-//! Runs each NT syscall via ActiveBreach *and* directly from ntdll, under
-//! three stress levels, then prints overall stats and per-call overhead.
+//! This is a performance benchmarking harness for the ActiveBreach syscall dispatch system.
+//!
+//! It compares native NTDLL syscalls (direct invocation) against the ActiveBreach syscall dispatcher
+//! under three stress levels (`Low`, `Medium`, `High`). The results are printed in a formatted table,
+//! including absolute time (in ms) and percentage overhead.
+//!
+//! ## Goals
+//! - Quantify dispatch overhead introduced by stub encryption, thread-mediator, etc
+//! - Validate syscall result equivalency under high throughput
+//! - Confirm dispatcher stability under 100k+ syscall loads
+//!
+//! ## Key Concepts
+//! - **Native Call**: Calls syscall directly via `ntdll.dll` FFI
+//! - **AB Call**: Calls via `ab_call()` which dispatches through an encrypted stub pool
+//! - **Stress Levels**:
+//!     - Low: 1,000 calls
+//!     - Medium: 10,000 calls
+//!     - High: 100,000 calls
+//!
+//! ## Notes
+//! - ActiveBreach is initialized via TLS callback on `DLL_PROCESS_ATTACH`
+//! - Benchmark tests are built as closures (boxed) to support reentrant setup
+//! - The test suite auto-generates syscall arguments per test iteration
+//!
+//! ## Safety
+//! This program uses unsafe NT API calls and raw pointers but is isolated in test context.
+//! All handles are either self handles or ephemeral.
 
 use std::{
     ptr::null_mut,
@@ -143,9 +168,6 @@ impl SyscallTest {
 }
 
 fn main() {
-    // small startup delay
-    thread::sleep(Duration::from_millis(500));
-
     let self_process = (-1isize) as HANDLE;
     let self_thread  = (-2isize) as HANDLE;
 

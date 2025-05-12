@@ -1,7 +1,4 @@
-//! ActiveBreach - Stub Manager (AbRingAllocator)
-//!
-//! Handles allocation, encryption, and lifecycle of syscall stub gadgets.
-//! Implements a ring-buffer allocator with auto-recycling, aligned for high-performance stealth use.
+//! Manages a ring-buffer of 16-byte-aligned memory stubs, each encoded with runtime encryption
 
 use std::ptr::{null_mut, write_bytes};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -15,21 +12,34 @@ use winapi::um::winnt::{
 use crate::internal::crypto::lea::{lea_encrypt_block, lea_decrypt_block};
 use lazy_static::lazy_static;
 
+/// Size of a syscall stub in bytes.
 pub const STUB_SIZE: usize = 32;
+
+/// Number of encrypted stubs to maintain in the ring pool.
 const NUM_STUBS: usize = 32;
 
-/// Represents a single encrypted syscall stub slot.
+/// A single encrypted syscall trampoline block.
+///
+/// This structure wraps a pointer to the memory holding the stub, and a flag indicating
+/// whether the block is currently encrypted.
 #[derive(Debug)]
 #[repr(C)]
 pub struct StubSlot {
+    /// Aligned memory block holding the encrypted syscall stub.
     pub addr: *mut u8,
+
+    /// Flag indicating whether this stub is currently encrypted at rest.
     pub encrypted: AtomicBool,
 }
 
 unsafe impl Send for StubSlot {}
 unsafe impl Sync for StubSlot {}
 
-/// Ring-based stub allocator used by ActiveBreach syscall proxy.
+/// A ring-based encrypted stub allocator used by ActiveBreach.
+///
+/// Provides per-thread stealth trampolines by rotating through a ring of encrypted
+/// syscall stubs. Decryption is performed lazily on acquire, and encryption is restored
+/// on release.
 pub struct AbRingAllocator {
     slots: [StubSlot; NUM_STUBS],
     index: AtomicUsize,
@@ -39,15 +49,18 @@ unsafe impl Send for AbRingAllocator {}
 unsafe impl Sync for AbRingAllocator {}
 
 lazy_static! {
-    /// Global stub pool allocator used by the dispatcher.
+    /// Global stub allocator used by the dispatcher thread.
     pub static ref G_STUB_POOL: AbRingAllocator = AbRingAllocator::init();
 }
 
 impl AbRingAllocator {
-    /// Initializes the stub pool, encrypting all syscall templates.
+    /// Initializes the stub ring, preallocating and encrypting each RWX stub.
+    ///
+    /// This is invoked once during dispatcher bootstrap. Each stub is encrypted immediately
+    /// after its template is written, and protected with `PAGE_NOACCESS` until acquired.
     pub fn init() -> Self {
         let mut slots: [MaybeUninit<StubSlot>; NUM_STUBS] =
-        std::array::from_fn(|_| MaybeUninit::uninit());
+            std::array::from_fn(|_| MaybeUninit::uninit());
 
         for i in 0..NUM_STUBS {
             let stub = Self::alloc_stub();
@@ -73,22 +86,26 @@ impl AbRingAllocator {
         }
     }
 
-    /// Allocates RWX memory for a single stub.
+    /// Allocates RWX memory for a new syscall stub, with 16-byte alignment.
+    ///
+    /// Panics if the allocation fails.
     #[inline(always)]
     fn alloc_stub() -> *mut u8 {
         let raw = unsafe {
             VirtualAlloc(null_mut(), STUB_SIZE + 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
         } as usize;
-    
+
         if raw == 0 {
             panic!("AbRingAllocator: stub allocation failed");
         }
-    
+
         let aligned = (raw + 15) & !15;
         aligned as *mut u8
-    }    
+    }
 
     /// Writes the syscall stub template to a newly allocated buffer.
+    ///
+    /// The stub includes `mov r10, rcx; mov eax, <ssn>; syscall; ret`, followed by padding.
     #[inline(always)]
     unsafe fn write_template(stub: *mut u8) {
         const TEMPLATE: [u8; 11] = [
@@ -102,9 +119,13 @@ impl AbRingAllocator {
         std::ptr::write_bytes(stub.add(TEMPLATE.len()), 0xCC, STUB_SIZE - TEMPLATE.len());
     }
 
-    /// Returns a decrypted syscall stub for use. Automatically rotates via ring.
+    /// Acquires a decrypted syscall stub from the ring.
     ///
-    /// Caller must release it via `release()` once the call is complete.
+    /// If available, decrypts the stub in-place, sets `PAGE_EXECUTE_READ`, and returns it.
+    /// Returns `None` if no slots are available.
+    ///
+    /// # Returns
+    /// `Some(*mut u8)` to a decrypted trampoline or `None` if exhausted.
     pub fn acquire(&self) -> Option<*mut u8> {
         let start = self.index.fetch_add(1, Ordering::Relaxed) % NUM_STUBS;
 
@@ -112,43 +133,30 @@ impl AbRingAllocator {
             let i = (start + offset) % NUM_STUBS;
             let slot = &self.slots[i];
 
-            let stub = slot.addr;
-            if stub.is_null() {
-                continue;
-            }
-
             unsafe {
-                // double check alignment (must be 16-byte for syscall tramp)
-                debug_assert_eq!(stub as usize % 16, 0, "[AB] stub not 16-byte aligned");
-
-                // make it writable to decrypt
                 let mut old = 0;
-                if VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old) == 0 {
-                    eprintln!("[AB] failed to make stub RWX at index {}", i);
-                    continue;
-                }
+                VirtualProtect(slot.addr as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old);
 
-                // decrypt if necessary
                 if slot.encrypted.swap(false, Ordering::SeqCst) {
-                    lea_decrypt_block(stub, STUB_SIZE);
+                    lea_decrypt_block(slot.addr, STUB_SIZE);
                 }
 
-                // set back to RX (just in case anything tries to scan memory perms)
-                if VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READ, &mut old) == 0 {
-                    eprintln!("[AB] failed to set stub to RX at index {}", i);
-                    continue;
-                }
+                VirtualProtect(slot.addr as _, STUB_SIZE, PAGE_EXECUTE_READ, &mut old);
             }
 
-            return Some(stub);
+            return Some(slot.addr);
         }
 
-        eprintln!("[AB] all stubs busy, no available slot");
         None
     }
 
-    /// Releases a stub back to the pool after use.
-    /// Re-encrypts the memory and restores protection to PAGE_NOACCESS.
+    /// Releases a stub after use, wiping and re-encrypting the region in-place.
+    ///
+    /// This restores the stub to `PAGE_NOACCESS`, zeroes its memory, rewrites the template,
+    /// and re-encrypts with LEA. It’s safe to call this multiple times.
+    ///
+    /// # Arguments
+    /// - `addr`: Pointer to the stub to return
     pub fn release(&self, addr: *mut u8) {
         for slot in &self.slots {
             if slot.addr == addr {

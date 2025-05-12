@@ -1,4 +1,14 @@
-use std::collections::BTreeMap;
+//! Parses a clean memory-mapped copy of `ntdll.dll` and extracts system service numbers (SSNs)
+//! from valid NT syscalls in the export table. This avoids relying on any user-mode API or
+//! potentially hooked function tables.
+//!
+//! The extracted map is cached in `SYSCALL_TABLE` for global access via [`get_syscall_table()`].
+//!
+//! ## Safety
+//! The functions in this module are **unsafe** because they perform unchecked pointer arithmetic
+//! and assume valid, properly aligned memory mapped from `ntdll.dll`.
+
+use rustc_hash::FxHashMap;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr::{null, null_mut};
@@ -8,160 +18,138 @@ use winapi::um::winnt::{IMAGE_DOS_HEADER, IMAGE_NT_HEADERS, IMAGE_EXPORT_DIRECTO
 
 use once_cell::sync::OnceCell;
 
-/// Global syscall lookup table containing NT syscall names and their corresponding SSNs (Syscall Service Numbers).
-///
-/// This is populated once via [`extract_syscalls`] and cached statically.
+/// Global static syscall table, initialized by [`extract_syscalls()`].
 #[link_section = ".rdata$ab"]
-pub static SYSCALL_TABLE: OnceCell<BTreeMap<String, u32>> = OnceCell::new();
+pub static SYSCALL_TABLE: OnceCell<FxHashMap<String, u32>> = OnceCell::new();
 
-/// Validates that a given offset falls within the mapped binary bounds.
+/// Validates that a memory offset falls within mapped image bounds.
+///
+/// # Safety
+/// - Caller must ensure `base` is a valid pointer.
+/// - `offset` must not cause integer overflow.
 #[inline(always)]
-unsafe fn validate_offset(base: *const u8, offset: usize, size: usize) -> bool {
+unsafe fn valid_offset(base: *const u8, offset: usize, size: usize) -> bool {
     offset < size && base.add(offset) >= base
 }
 
-/// Performs an unaligned pointer read if the pointer is valid.
-///
-/// Returns `None` if the pointer is null.
-#[inline(always)]
-unsafe fn safe_read<T>(ptr: *const T) -> Option<T> {
-    if ptr.is_null() {
-        None
-    } else {
-        Some(std::ptr::read_unaligned(ptr))
-    }
-}
-
-/// Extracts NT syscalls from a memory-mapped ntdll.dll image and populates the global [`SYSCALL_TABLE`].
-///
-/// This function parses the PE headers, locates the export table, filters out exported functions
-/// starting with `"Nt"`, checks for syscall-compatible prologues, and extracts their SSNs.
-///
-/// # Arguments
-/// - `ntdll_base`: pointer to base of mapped ntdll memory
-/// - `ntdll_size`: size of mapped region
+/// Reads an unaligned `u32` value from a raw pointer.
 ///
 /// # Safety
-/// - Assumes `ntdll_base` is a valid PE image in memory.
-/// - Performs unchecked pointer arithmetic and casting.
-/// - Multiple calls are silently ignored if the table is already initialized.
+/// - Pointer must be valid and point to at least 4 bytes.
+#[inline(always)]
+unsafe fn read_u32(ptr: *const u32) -> u32 {
+    std::ptr::read_unaligned(ptr)
+}
+
+/// Reads an unaligned `u16` value from a raw pointer.
 ///
-/// # Notes
-/// Returns early and silently on any structural validation failure.
-pub unsafe fn extract_syscalls(ntdll_base: *const u8, ntdll_size: usize) {
-    if ntdll_base.is_null() || ntdll_size == 0 || SYSCALL_TABLE.get().is_some() {
+/// # Safety
+/// - Pointer must be valid and point to at least 2 bytes.
+#[inline(always)]
+unsafe fn read_u16(ptr: *const u16) -> u16 {
+    std::ptr::read_unaligned(ptr)
+}
+
+/// Extracts syscall numbers from a mapped `ntdll.dll` image.
+///
+/// This performs full PE parsing and filters for valid NT syscall prologues.
+///
+/// # Arguments
+/// - `ntdll`: Pointer to memory-mapped ntdll.dll image (must be clean, unhooked)
+/// - `size`: Size in bytes of the mapped image
+///
+/// # Safety
+/// - Caller must guarantee that `ntdll` is valid, readable, and represents a PE image.
+/// - Assumes the image is from System32, not a loaded module (e.g. via `LoadLibrary`).
+///
+/// # Implementation Notes
+/// - Valid NT syscall signatures are matched on prologues:
+///   - `mov r10, rcx; mov eax, imm32; syscall; ret`
+///   - `mov eax, imm32; syscall; ret`
+///   - `mov r10, rcx` (64-bit variant for Wow64 passthrough)
+pub unsafe fn extract_syscalls(ntdll: *const u8, size: usize) {
+    if ntdll.is_null() || size == 0 || SYSCALL_TABLE.get().is_some() {
         return;
     }
 
-    if !validate_offset(ntdll_base, 0, ntdll_size) {
+    if !valid_offset(ntdll, 0, size) {
         return;
     }
 
-    let dos = &*(ntdll_base as *const IMAGE_DOS_HEADER);
+    let dos = &*(ntdll as *const IMAGE_DOS_HEADER);
     if dos.e_magic != 0x5A4D {
         return;
     }
 
     let nt_offset = dos.e_lfanew as usize;
-    if !validate_offset(ntdll_base, nt_offset + std::mem::size_of::<IMAGE_NT_HEADERS>(), ntdll_size) {
+    if !valid_offset(ntdll, nt_offset + std::mem::size_of::<IMAGE_NT_HEADERS>(), size) {
         return;
     }
 
-    let nt = &*(ntdll_base.add(nt_offset) as *const IMAGE_NT_HEADERS);
+    let nt = &*(ntdll.add(nt_offset) as *const IMAGE_NT_HEADERS);
     if nt.Signature != 0x00004550 {
         return;
     }
 
     let export_va = nt.OptionalHeader.DataDirectory[0].VirtualAddress as usize;
-    if export_va == 0 || export_va >= ntdll_size {
+    if export_va == 0 || !valid_offset(ntdll, export_va, size) {
         return;
     }
 
-    if !validate_offset(ntdll_base, export_va + std::mem::size_of::<IMAGE_EXPORT_DIRECTORY>(), ntdll_size) {
-        return;
-    }
+    let export = &*(ntdll.add(export_va) as *const IMAGE_EXPORT_DIRECTORY);
 
-    let export = &*(ntdll_base.add(export_va) as *const IMAGE_EXPORT_DIRECTORY);
+    let names = ntdll.add(export.AddressOfNames as usize) as *const u32;
+    let ords  = ntdll.add(export.AddressOfNameOrdinals as usize) as *const u16;
+    let funcs = ntdll.add(export.AddressOfFunctions as usize) as *const u32;
+
     let name_count = export.NumberOfNames as usize;
     let func_count = export.NumberOfFunctions as usize;
 
-    let names_offset = export.AddressOfNames as usize;
-    let ords_offset = export.AddressOfNameOrdinals as usize;
-    let funcs_offset = export.AddressOfFunctions as usize;
-
-    if !validate_offset(ntdll_base, names_offset + name_count * 4, ntdll_size)
-        || !validate_offset(ntdll_base, ords_offset + name_count * 2, ntdll_size)
-        || !validate_offset(ntdll_base, funcs_offset + func_count * 4, ntdll_size)
-    {
-        return;
-    }
-
-    let names_ptr = ntdll_base.add(names_offset) as *const u32;
-    let ords_ptr = ntdll_base.add(ords_offset) as *const u16;
-    let funcs_ptr = ntdll_base.add(funcs_offset) as *const u32;
-
-    let mut map = BTreeMap::new();
+    let mut map = FxHashMap::with_capacity_and_hasher(name_count, Default::default());
 
     for i in 0..name_count {
-        let name_rva = match safe_read(names_ptr.add(i)) {
-            Some(v) => v as usize,
-            None => continue,
-        };
+        let name_rva = read_u32(names.add(i)) as usize;
+        if name_rva >= size { continue; }
 
-        if !validate_offset(ntdll_base, name_rva, ntdll_size) {
+        let name_ptr = ntdll.add(name_rva) as *const c_char;
+        let name_bytes = CStr::from_ptr(name_ptr).to_bytes();
+
+        // Only extract syscalls that begin with "Nt"
+        if name_bytes.len() < 3 || name_bytes[0] != b'N' || name_bytes[1] != b't' {
             continue;
         }
 
-        let name_ptr = ntdll_base.add(name_rva) as *const c_char;
-        let Ok(name_str) = CStr::from_ptr(name_ptr).to_str() else { continue };
-        if !name_str.starts_with("Nt") {
-            continue;
-        }
+        let ordinal = read_u16(ords.add(i)) as usize;
+        if ordinal >= func_count { continue; }
 
-        let ordinal = match safe_read(ords_ptr.add(i)) {
-            Some(v) => v as usize,
-            None => continue,
-        };
+        let func_rva = read_u32(funcs.add(ordinal)) as usize;
+        if func_rva + 8 >= size { continue; }
 
-        if ordinal >= func_count {
-            continue;
-        }
-
-        let func_rva = match safe_read(funcs_ptr.add(ordinal)) {
-            Some(v) => v as usize,
-            None => continue,
-        };
-
-        if !validate_offset(ntdll_base, func_rva + 8, ntdll_size) {
-            continue;
-        }
-
-        let func_ptr = ntdll_base.add(func_rva);
-
-        let sig = slice::from_raw_parts(func_ptr, 8);
+        let sig = slice::from_raw_parts(ntdll.add(func_rva), 8);
 
         let is_valid = match sig {
-            [0x4C, 0x8B, 0xD1, 0xB8, ..] => true,
-            [0xB8, ..] => true,
+            [0x4C, 0x8B, 0xD1, 0xB8, ..] |
+            [0xB8, ..] |
             [0x4D, 0x8B, 0xD1, 0xB8, ..] => true,
             _ => false,
         };
-        
-        if !is_valid {
-            continue;
-        }        
 
-        let syscall_num = u32::from_le_bytes([sig[4], sig[5], sig[6], sig[7]]);
-        map.insert(name_str.to_string(), syscall_num);
+        if !is_valid { continue; }
+
+        let ssn = u32::from_le_bytes([sig[4], sig[5], sig[6], sig[7]]);
+        let key = String::from_utf8_unchecked(name_bytes.to_vec());
+
+        map.insert(key, ssn);
     }
 
     let _ = SYSCALL_TABLE.set(map);
 }
 
-/// Retrieves a reference to the global syscall table, if initialized.
+/// Returns a reference to the global syscall table, if initialized.
 ///
 /// # Returns
-/// `Some(&BTreeMap)` if initialized, `None` otherwise.
-pub fn get_syscall_table() -> Option<&'static BTreeMap<String, u32>> {
+/// - `Some(&FxHashMap<String, u32>)` if the table is ready
+/// - `None` otherwise
+pub fn get_syscall_table() -> Option<&'static FxHashMap<String, u32>> {
     SYSCALL_TABLE.get()
 }

@@ -1,68 +1,55 @@
-use std::env;
-use std::ffi::OsStr;
-use std::os::windows::ffi::OsStrExt;
-use std::ptr::{null, null_mut};
+//! Provides safe(ish) helpers to map a clean `ntdll.dll` copy from disk into memory, ensuring
+//! no tampered bytes from userland injection affect syscall discovery logic.
+//! The `ntdll.dll` image is mapped as read-only, never loaded via `LoadLibrary`, and is pulled
+//! directly from `C:\Windows\System32\ntdll.dll` using low-level file I/O APIs.
 
-use winapi::shared::minwindef::DWORD;
-use winapi::um::errhandlingapi::GetLastError;
-use winapi::um::fileapi::{CreateFileW, GetFileSize, ReadFile, OPEN_EXISTING, INVALID_FILE_SIZE};
+use std::ptr::{null, null_mut};
+use winapi::shared::minwindef::{DWORD, FALSE};
+use winapi::shared::ntdef::NULL;
+use winapi::um::fileapi::CreateFileW;
 use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
-use winapi::um::memoryapi::{VirtualAlloc, VirtualFree};
+use winapi::um::memoryapi::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile};
 use winapi::um::winnt::{
-    FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, GENERIC_READ,
-    MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE, MEM_RELEASE,
+    FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, GENERIC_READ, PAGE_READONLY,
 };
 
-use crate::internal::crypto::coder::{decode, ENC};
+use winapi::um::fileapi::OPEN_EXISTING;
+use winapi::um::memoryapi::FILE_MAP_READ;
 
-/// Builds a full path to a file in `System32\` by appending the decoded filename
-/// to the `%SystemRoot%\System32\` or `%windir%\System32\` path.
+/// UTF-16 encoded `C:\Windows\System32\ntdll.dll` static path.
 ///
-/// # Arguments
-/// - `encoded`: UTF-16 encoded file name (null-terminated).
+/// This avoids any reliance on `GetSystemDirectory` or `GetModuleFileName` APIs,
+/// ensuring fully predictable resolution even in sandboxed or suspended states.
+const SYSTEM32_NTDLL: &[u16] = &[
+    b'C' as u16, b':' as u16, b'\\' as u16,
+    b'W' as u16, b'i' as u16, b'n' as u16, b'd' as u16, b'o' as u16, b'w' as u16, b's' as u16,
+    b'\\' as u16,
+    b'S' as u16, b'y' as u16, b's' as u16, b't' as u16, b'e' as u16, b'm' as u16,
+    b'3' as u16, b'2' as u16, b'\\' as u16,
+    b'n' as u16, b't' as u16, b'd' as u16, b'l' as u16, b'l' as u16, b'.' as u16,
+    b'd' as u16, b'l' as u16, b'l' as u16,
+    0
+];
+
+/// Maps a fresh copy of `ntdll.dll` into memory directly from disk as read-only.
 ///
-/// # Returns
-/// UTF-16-encoded full path ready to pass to `CreateFileW`.
-#[inline(always)]
-fn build_sys32_path(encoded: &[u16]) -> Vec<u16> {
-    let base = env::var_os("SystemRoot")
-        .or_else(|| env::var_os("windir"))
-        .unwrap_or_else(|| OsStr::new("C:\\Windows").to_os_string());
-
-    let base_str = base.to_string_lossy();
-
-    let mut full = base_str.encode_utf16().collect::<Vec<u16>>();
-    full.push(b'\\' as u16);
-    full.extend("System32\\".encode_utf16());
-
-    let len = encoded.iter().position(|&c| c == 0).unwrap_or(encoded.len());
-    full.extend_from_slice(&encoded[..len]);
-    full.push(0);
-    full
-}
-
-/// Loads and maps a file from `System32` into memory, returning a read-write buffer.
-///
-/// The file name is obfuscated and decoded at runtime using the internal `coder::decode()` function.
-///
-/// # Arguments
-/// - `out_size`: pointer to a usize that receives the size of the mapped file.
+/// This is used during syscall table extraction to avoid contaminated or hooked in-memory versions.
 ///
 /// # Returns
-/// A pointer to the memory buffer containing the file's contents. Returns `None` if any step fails.
+/// A tuple containing:
+/// - `*const u8`: Pointer to the start of the mapped memory view
+/// - `HANDLE`: Handle to the memory map (must be passed to [`unmap_and_close()`])
+///
+/// # Arguments
+/// * `size_out` - Optional output for estimated size. Defaults to 2MB upper-bound.
 ///
 /// # Safety
-/// This function performs raw memory allocation and Windows API calls. Caller must `VirtualFree()`
-/// the returned buffer after use using [`zero_and_free()`].
+/// - Caller **must** invoke [`unmap_and_close()`] with both values returned from this function.
+/// - This function performs raw memory mapping and direct file handle manipulation.
 ///
-/// # Errors
-/// Returns `None` on any failure: file not found, bad permissions, allocation failure, etc.
-pub unsafe fn buffer(out_size: &mut usize) -> Option<*mut winapi::ctypes::c_void> {
-    let decoded = decode(&ENC);
-    let path_w = build_sys32_path(&decoded);
-
-    let file = CreateFileW(
-        path_w.as_ptr(),
+pub unsafe fn buffer(size_out: &mut usize) -> Option<(*const u8, winapi::shared::ntdef::HANDLE)> {
+    let h_file = CreateFileW(
+        SYSTEM32_NTDLL.as_ptr(),
         GENERIC_READ,
         FILE_SHARE_READ,
         null_mut(),
@@ -71,69 +58,42 @@ pub unsafe fn buffer(out_size: &mut usize) -> Option<*mut winapi::ctypes::c_void
         null_mut(),
     );
 
-    if file == INVALID_HANDLE_VALUE {
+    if h_file == INVALID_HANDLE_VALUE {
         return None;
     }
 
-    let file_size = GetFileSize(file, null_mut());
-    if file_size == INVALID_FILE_SIZE || file_size == 0 {
-        CloseHandle(file);
+    let h_map = CreateFileMappingW(h_file, null_mut(), PAGE_READONLY, 0, 0, null());
+    if h_map.is_null() {
+        CloseHandle(h_file);
         return None;
     }
 
-    let buffer = VirtualAlloc(
-        null_mut(),
-        file_size as usize,
-        MEM_COMMIT | MEM_RESERVE,
-        PAGE_READWRITE,
-    ) as *mut winapi::ctypes::c_void;
-
-    if buffer.is_null() {
-        CloseHandle(file);
+    let mapped = MapViewOfFile(h_map, FILE_MAP_READ, 0, 0, 0);
+    if mapped.is_null() {
+        CloseHandle(h_map);
+        CloseHandle(h_file);
         return None;
     }
 
-    let mut bytes_read: DWORD = 0;
-    let read_ok = ReadFile(file, buffer, file_size, &mut bytes_read, null_mut()) != 0;
-    CloseHandle(file);
+    // We assume a 2MB upper bound, since the ntdll image size is well under this.
+    *size_out = 2 * 1024 * 1024;
 
-    if !read_ok || bytes_read != file_size {
-        VirtualFree(buffer, 0, MEM_RELEASE);
-        return None;
-    }
-
-    *out_size = file_size as usize;
-    Some(buffer)
+    Some((mapped as *const u8, h_map))
 }
 
-/// Zeroes and frees a memory buffer previously returned by [`buffer()`].
+/// Unmaps and closes a handle returned by [`buffer()`].
 ///
-/// This function securely overwrites the contents of the memory region before releasing it.
-///
-/// # Arguments
-/// - `buffer`: pointer to memory region
-/// - `size`: number of bytes to zero
+/// This should be called exactly once per successful call to `buffer()` to avoid memory leaks.
 ///
 /// # Safety
-/// - `buffer` must have been returned by [`VirtualAlloc`] or [`buffer()`]
-/// - Undefined behavior if buffer is invalid or not sized correctly
-pub unsafe fn zero_and_free(buffer: *mut winapi::ctypes::c_void, size: usize) {
-    if !buffer.is_null() {
-        let mut ptr = buffer as *mut u64;
-        let end = ptr.add(size / 8);
-        while ptr < end {
-            std::ptr::write_volatile(ptr, 0);
-            ptr = ptr.add(1);
-        }
+/// - The `mapped` pointer must be one returned by [`buffer()`].
+/// - The `handle` must be the file mapping handle returned from the same call.
+pub unsafe fn unmap_and_close(mapped: *const u8, handle: winapi::shared::ntdef::HANDLE) {
+    if !mapped.is_null() {
+        UnmapViewOfFile(mapped as _);
+    }
 
-        let rem = size % 8;
-        if rem > 0 {
-            let byte_ptr = end as *mut u8;
-            for i in 0..rem {
-                std::ptr::write_volatile(byte_ptr.add(i), 0);
-            }
-        }
-
-        VirtualFree(buffer, 0, MEM_RELEASE);
+    if handle != NULL {
+        CloseHandle(handle);
     }
 }

@@ -18,6 +18,7 @@ winapi = { version = "0.3.9", features = [
     "sysinfoapi", "fileapi", "processthreadsapi", "memoryapi",
     "synchapi", "errhandlingapi", "libloaderapi", "threadpoolapiset"
 ] }
+rustc-hash = "2.1.1"
 
 [lib]
 name = "activebreach"
