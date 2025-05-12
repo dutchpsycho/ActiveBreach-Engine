@@ -8,24 +8,46 @@ use winapi::um::winnt::{IMAGE_DOS_HEADER, IMAGE_NT_HEADERS, IMAGE_EXPORT_DIRECTO
 
 use once_cell::sync::OnceCell;
 
-use crate::internal::err::fatal_err;
-
+/// Global syscall lookup table containing NT syscall names and their corresponding SSNs (Syscall Service Numbers).
+///
+/// This is populated once via [`extract_syscalls`] and cached statically.
 #[link_section = ".rdata$ab"]
 pub static SYSCALL_TABLE: OnceCell<BTreeMap<String, u32>> = OnceCell::new();
 
+/// Validates that a given offset falls within the mapped binary bounds.
 #[inline(always)]
 unsafe fn validate_offset(base: *const u8, offset: usize, size: usize) -> bool {
     offset < size && base.add(offset) >= base
 }
 
+/// Performs an unaligned pointer read if the pointer is valid.
+///
+/// Returns `None` if the pointer is null.
 #[inline(always)]
 unsafe fn safe_read<T>(ptr: *const T) -> Option<T> {
     if ptr.is_null() {
-        return None;
+        None
+    } else {
+        Some(std::ptr::read_unaligned(ptr))
     }
-    Some(std::ptr::read_unaligned(ptr))
 }
 
+/// Extracts NT syscalls from a memory-mapped ntdll.dll image and populates the global [`SYSCALL_TABLE`].
+///
+/// This function parses the PE headers, locates the export table, filters out exported functions
+/// starting with `"Nt"`, checks for syscall-compatible prologues, and extracts their SSNs.
+///
+/// # Arguments
+/// - `ntdll_base`: pointer to base of mapped ntdll memory
+/// - `ntdll_size`: size of mapped region
+///
+/// # Safety
+/// - Assumes `ntdll_base` is a valid PE image in memory.
+/// - Performs unchecked pointer arithmetic and casting.
+/// - Multiple calls are silently ignored if the table is already initialized.
+///
+/// # Notes
+/// Returns early and silently on any structural validation failure.
 pub unsafe fn extract_syscalls(ntdll_base: *const u8, ntdll_size: usize) {
     if ntdll_base.is_null() || ntdll_size == 0 || SYSCALL_TABLE.get().is_some() {
         return;
@@ -115,11 +137,19 @@ pub unsafe fn extract_syscalls(ntdll_base: *const u8, ntdll_size: usize) {
         }
 
         let func_ptr = ntdll_base.add(func_rva);
+
         let sig = slice::from_raw_parts(func_ptr, 8);
 
-        if sig[0] != 0x4C || sig[1] != 0x8B || sig[2] != 0xD1 || sig[3] != 0xB8 {
+        let is_valid = match sig {
+            [0x4C, 0x8B, 0xD1, 0xB8, ..] => true,
+            [0xB8, ..] => true,
+            [0x4D, 0x8B, 0xD1, 0xB8, ..] => true,
+            _ => false,
+        };
+        
+        if !is_valid {
             continue;
-        }
+        }        
 
         let syscall_num = u32::from_le_bytes([sig[4], sig[5], sig[6], sig[7]]);
         map.insert(name_str.to_string(), syscall_num);
@@ -128,6 +158,10 @@ pub unsafe fn extract_syscalls(ntdll_base: *const u8, ntdll_size: usize) {
     let _ = SYSCALL_TABLE.set(map);
 }
 
+/// Retrieves a reference to the global syscall table, if initialized.
+///
+/// # Returns
+/// `Some(&BTreeMap)` if initialized, `None` otherwise.
 pub fn get_syscall_table() -> Option<&'static BTreeMap<String, u32>> {
     SYSCALL_TABLE.get()
 }

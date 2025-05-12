@@ -1,0 +1,19 @@
+[package]
+name = "testrunner"
+version = "0.1.0"
+edition = "2021"
+license = "CC-BY-NC-4.0"
+description = "Test harness for ActiveBreach syscall proxy engine"
+
+[dependencies]
+activebreach = { path = "../" }
+winapi = { version = "0.3.9", features = [
+    "handleapi",
+    "libloaderapi",
+    "minwindef",
+    "processthreadsapi",
+    "synchapi",
+    "winbase",
+    "ntdef",
+    "winnt"
+] }
