@@ -26,8 +26,6 @@ Most public syscall tooling falls into one of two buckets:
 
 Rather than restoring overwritten memory, touching hooks or exploiting the kernel, ActiveBreach extracts SSN's from a clean memory copy of `ntdll.dll`, builds ephemeral execution stubs in dynamically allocated memory, and proxies all execution through an isolated, internal unlinked dispatcher thread. All syscall interactions are memory-local, thread-isolated, and AV-opaque. Rust crate also encrypts stubs at rest.
 
-Oh yeah, this also doesn't expose any Nt* or ntdll.dll strings, they're encrypted, encoded or hashed.
-
 ---
 
 ### ActiveBreach Language Implementations
