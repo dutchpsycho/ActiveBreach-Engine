@@ -44,7 +44,7 @@
  
  use std::ptr::{null_mut, null};
  use winapi::um::{handleapi::CloseHandle, processthreadsapi::CreateThread};
- 
+
 /// Launches the ActiveBreach syscall dispatcher thread and loads the syscall table.
 ///
 /// This function performs the following:
@@ -68,29 +68,7 @@
 /// }
 /// ```
 pub unsafe fn activebreach_launch() -> Result<(), &'static str> {
-    let mut mapped_size = 0;
-
-    let (mapped_base, map_handle) = internal::file_buffer::buffer(&mut mapped_size)
-        .ok_or("ActiveBreach: file buffer fail")?;
-
-    internal::exports::extract_syscalls(mapped_base, mapped_size);
-
-    let hThread = CreateThread(
-        null_mut(),
-        0,
-        Some(internal::dispatch::thread_proc),
-        null_mut(),
-        0,
-        null_mut(),
-    );
-
-    if hThread.is_null() {
-        return Err("ActiveBreach: thread creation failed");
-    }
-
-    internal::file_buffer::unmap_and_close(mapped_base, map_handle);
-    CloseHandle(hThread);
-    Ok(())
+    internal::thread::spawn_ab_thread()
 }
 
 /// Issues a native system call via ActiveBreach by syscall name and arguments.

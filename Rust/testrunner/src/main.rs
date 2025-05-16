@@ -168,6 +168,15 @@ impl SyscallTest {
 }
 
 fn main() {
+    
+    if let Some(table) = get_syscall_table() {
+        for (name, id) in table.iter() {
+            println!("{:<32} = 0x{:X}", name, id);
+        }
+    } else {
+        println!("syscall table is uninitialized");
+    }
+
     let self_process = (-1isize) as HANDLE;
     let self_thread  = (-2isize) as HANDLE;
 

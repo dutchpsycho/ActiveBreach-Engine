@@ -7,149 +7,185 @@
 //! ## Safety
 //! The functions in this module are **unsafe** because they perform unchecked pointer arithmetic
 //! and assume valid, properly aligned memory mapped from `ntdll.dll`.
+//!
+//! Any failure at a critical step will immediately raise a non-continuable exception with a
+//! unique code to pinpoint the exact fault.
 
 use rustc_hash::FxHashMap;
-use std::ffi::CStr;
-use std::os::raw::c_char;
-use std::ptr::{null, null_mut};
-use std::slice;
-
-use winapi::um::winnt::{IMAGE_DOS_HEADER, IMAGE_NT_HEADERS, IMAGE_EXPORT_DIRECTORY};
-
+use std::{ffi::CStr, os::raw::c_char, slice};
+use winapi::{
+    shared::minwindef::ULONG,
+    um::{
+        errhandlingapi::RaiseException,
+        winnt::{
+            IMAGE_DOS_HEADER, IMAGE_NT_HEADERS, IMAGE_EXPORT_DIRECTORY, IMAGE_SECTION_HEADER,
+        },
+    },
+};
 use once_cell::sync::OnceCell;
 
-/// Global static syscall table, initialized by [`extract_syscalls()`].
 #[link_section = ".rdata$ab"]
+/// Global static syscall table, initialized by [`extract_syscalls()`].
 pub static SYSCALL_TABLE: OnceCell<FxHashMap<String, u32>> = OnceCell::new();
 
-/// Validates that a memory offset falls within mapped image bounds.
-///
-/// # Safety
-/// - Caller must ensure `base` is a valid pointer.
-/// - `offset` must not cause integer overflow.
+/// Immediately raises a non-continuable exception with the given code.
+/// 
+/// This is used to fault crisply when any PE-parsing step fails.
 #[inline(always)]
-unsafe fn valid_offset(base: *const u8, offset: usize, size: usize) -> bool {
-    offset < size && base.add(offset) >= base
+unsafe fn critical_fault(code: ULONG) -> ! {
+    // EXCEPTION_NONCONTINUABLE = 0x1
+    RaiseException(code, 0x1, 0, std::ptr::null());
+    std::hint::unreachable_unchecked()
 }
 
-/// Reads an unaligned `u32` value from a raw pointer.
+/// Translates an RVA into a usable pointer inside a mapped PE image, or faults if invalid.
+/// 
+/// # Arguments
+/// - `base`: Pointer to base of image (raw file or memory-mapped module)
+/// - `rva`: RVA offset to resolve
+/// - `size`: Full size of the mapped image in bytes
+/// - `sections`: Slice of section headers from the image
+/// - `fault_code`: base exception code to raise on failure
 ///
 /// # Safety
-/// - Pointer must be valid and point to at least 4 bytes.
-#[inline(always)]
-unsafe fn read_u32(ptr: *const u32) -> u32 {
-    std::ptr::read_unaligned(ptr)
-}
+/// - Caller must guarantee `base` and `sections` accurately describe a valid PE image.
+///
+unsafe fn rva_to_ptr_or_fault(
+    base: *const u8,
+    rva: usize,
+    size: usize,
+    sections: &[IMAGE_SECTION_HEADER],
+    fault_code: ULONG,
+) -> *const u8 {
+    if base.is_null() {
+        critical_fault(fault_code);
+    }
+    if rva >= size {
+        critical_fault(fault_code + 1);
+    }
 
-/// Reads an unaligned `u16` value from a raw pointer.
-///
-/// # Safety
-/// - Pointer must be valid and point to at least 2 bytes.
-#[inline(always)]
-unsafe fn read_u16(ptr: *const u16) -> u16 {
-    std::ptr::read_unaligned(ptr)
+    for sec in sections {
+        let virt_start = sec.VirtualAddress as usize;
+        let virt_size = *sec.Misc.VirtualSize() as usize;
+        if rva >= virt_start && rva < virt_start + virt_size {
+            let file_offset = sec.PointerToRawData as usize + (rva - virt_start);
+            if file_offset < size {
+                return base.add(file_offset);
+            }
+        }
+    }
+
+    // RVA not covered by any section
+    critical_fault(fault_code + 2);
 }
 
 /// Extracts syscall numbers from a mapped `ntdll.dll` image.
+/// 
+/// This performs full PE parsing and filters for valid NT syscall prologues:
+/// - `mov r10, rcx; mov eax, imm32; syscall; ret`
+/// - `mov eax, imm32; syscall; ret`
+/// - `mov r10, rcx; ...` (Wow64 shim variant)
 ///
-/// This performs full PE parsing and filters for valid NT syscall prologues.
+/// Any unexpected condition (invalid headers, out-of-bounds RVAs, failed init)
+/// raises a non-continuable exception with a unique code.
 ///
 /// # Arguments
 /// - `ntdll`: Pointer to memory-mapped ntdll.dll image (must be clean, unhooked)
 /// - `size`: Size in bytes of the mapped image
 ///
 /// # Safety
-/// - Caller must guarantee that `ntdll` is valid, readable, and represents a PE image.
-/// - Assumes the image is from System32, not a loaded module (e.g. via `LoadLibrary`).
-///
-/// # Implementation Notes
-/// - Valid NT syscall signatures are matched on prologues:
-///   - `mov r10, rcx; mov eax, imm32; syscall; ret`
-///   - `mov eax, imm32; syscall; ret`
-///   - `mov r10, rcx` (64-bit variant for Wow64 passthrough)
+/// - Caller must guarantee that `ntdll` is valid, readable, and represents a System32 PE.
+/// - Must be called at most once per process lifetime.
 pub unsafe fn extract_syscalls(ntdll: *const u8, size: usize) {
-    if ntdll.is_null() || size == 0 || SYSCALL_TABLE.get().is_some() {
-        return;
+    // null or zero size → fault
+    if ntdll.is_null() {
+        critical_fault(0xDEAD_0001);
+    }
+    if size == 0 {
+        critical_fault(0xDEAD_0002);
+    }
+    if SYSCALL_TABLE.get().is_some() {
+        critical_fault(0xDEAD_0003);
     }
 
-    if !valid_offset(ntdll, 0, size) {
-        return;
-    }
-
+    // DOS header
     let dos = &*(ntdll as *const IMAGE_DOS_HEADER);
     if dos.e_magic != 0x5A4D {
-        return;
+        critical_fault(0xDEAD_0010);
     }
 
+    // NT headers
     let nt_offset = dos.e_lfanew as usize;
-    if !valid_offset(ntdll, nt_offset + std::mem::size_of::<IMAGE_NT_HEADERS>(), size) {
-        return;
-    }
-
     let nt = &*(ntdll.add(nt_offset) as *const IMAGE_NT_HEADERS);
-    if nt.Signature != 0x00004550 {
-        return;
+    if nt.Signature != 0x0000_4550 {
+        critical_fault(0xDEAD_0011);
     }
 
+    // Section headers
+    let num_secs = nt.FileHeader.NumberOfSections as usize;
+    let secs_ptr = ntdll
+        .add(nt_offset + std::mem::size_of::<IMAGE_NT_HEADERS>())
+        as *const IMAGE_SECTION_HEADER;
+    let sections = slice::from_raw_parts(secs_ptr, num_secs);
+
+    // Export directory
     let export_va = nt.OptionalHeader.DataDirectory[0].VirtualAddress as usize;
-    if export_va == 0 || !valid_offset(ntdll, export_va, size) {
-        return;
-    }
+    let export_ptr = rva_to_ptr_or_fault(ntdll, export_va, size, sections, 0xDEAD_0100)
+        as *const IMAGE_EXPORT_DIRECTORY;
+    let export = &*export_ptr;
 
-    let export = &*(ntdll.add(export_va) as *const IMAGE_EXPORT_DIRECTORY);
-
-    let names = ntdll.add(export.AddressOfNames as usize) as *const u32;
-    let ords  = ntdll.add(export.AddressOfNameOrdinals as usize) as *const u16;
-    let funcs = ntdll.add(export.AddressOfFunctions as usize) as *const u32;
-
+    // Tables & counts
     let name_count = export.NumberOfNames as usize;
     let func_count = export.NumberOfFunctions as usize;
 
+    let names = rva_to_ptr_or_fault(ntdll, export.AddressOfNames as usize, size, sections, 0xDEAD_0101)
+        as *const u32;
+    let ords = rva_to_ptr_or_fault(ntdll, export.AddressOfNameOrdinals as usize, size, sections, 0xDEAD_0102)
+        as *const u16;
+    let funcs = rva_to_ptr_or_fault(ntdll, export.AddressOfFunctions as usize, size, sections, 0xDEAD_0103)
+        as *const u32;
+
+    // Build syscall map
     let mut map = FxHashMap::with_capacity_and_hasher(name_count, Default::default());
-
     for i in 0..name_count {
-        let name_rva = read_u32(names.add(i)) as usize;
-        if name_rva >= size { continue; }
-
-        let name_ptr = ntdll.add(name_rva) as *const c_char;
+        let name_rva = std::ptr::read_unaligned(names.add(i)) as usize;
+        let name_ptr =
+            rva_to_ptr_or_fault(ntdll, name_rva, size, sections, 0xDEAD_0200) as *const c_char;
         let name_bytes = CStr::from_ptr(name_ptr).to_bytes();
-
-        // Only extract syscalls that begin with "Nt"
-        if name_bytes.len() < 3 || name_bytes[0] != b'N' || name_bytes[1] != b't' {
+        if name_bytes.len() < 3 || &name_bytes[..2] != b"Nt" {
             continue;
         }
 
-        let ordinal = read_u16(ords.add(i)) as usize;
-        if ordinal >= func_count { continue; }
+        let ord = std::ptr::read_unaligned(ords.add(i)) as usize;
+        if ord >= func_count {
+            critical_fault(0xDEAD_0201);
+        }
+        let func_rva = std::ptr::read_unaligned(funcs.add(ord)) as usize;
+        let sig_ptr = rva_to_ptr_or_fault(ntdll, func_rva, size, sections, 0xDEAD_0202);
+        let sig = slice::from_raw_parts(sig_ptr, 8);
 
-        let func_rva = read_u32(funcs.add(ordinal)) as usize;
-        if func_rva + 8 >= size { continue; }
-
-        let sig = slice::from_raw_parts(ntdll.add(func_rva), 8);
-
-        let is_valid = match sig {
+        let valid = matches!(
+            sig,
             [0x4C, 0x8B, 0xD1, 0xB8, ..] |
             [0xB8, ..] |
-            [0x4D, 0x8B, 0xD1, 0xB8, ..] => true,
-            _ => false,
-        };
-
-        if !is_valid { continue; }
+            [0x4D, 0x8B, 0xD1, 0xB8, ..]
+        );
+        if !valid {
+            continue;
+        }
 
         let ssn = u32::from_le_bytes([sig[4], sig[5], sig[6], sig[7]]);
         let key = String::from_utf8_unchecked(name_bytes.to_vec());
-
         map.insert(key, ssn);
     }
 
-    let _ = SYSCALL_TABLE.set(map);
+    // Cache globally or fault if already set
+    if SYSCALL_TABLE.set(map).is_err() {
+        critical_fault(0xDEAD_0FFF);
+    }
 }
 
 /// Returns a reference to the global syscall table, if initialized.
-///
-/// # Returns
-/// - `Some(&FxHashMap<String, u32>)` if the table is ready
-/// - `None` otherwise
 pub fn get_syscall_table() -> Option<&'static FxHashMap<String, u32>> {
     SYSCALL_TABLE.get()
 }

@@ -87,6 +87,8 @@ pub static G_READY: AtomicBool = AtomicBool::new(false);
 /// It assumes `G_OPFRAME` is uninitialized and will remain in memory.
 ///
 pub unsafe extern "system" fn thread_proc(_: *mut winapi::ctypes::c_void) -> u32 {
+    crate::internal::thread::nuke_teb_soft();
+
     G_OPFRAME.write(ABOpFrame::default());
     G_READY.store(true, Ordering::Release);
 
