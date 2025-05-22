@@ -24,19 +24,13 @@ use winapi::{
 };
 use once_cell::sync::OnceCell;
 
+use crate::internal::mapper::drop_ntdll;
+use crate::internal::diagnostics::*;
+use crate::printdev;
+
 #[link_section = ".rdata$ab"]
 /// Global static syscall table, initialized by [`extract_syscalls()`].
 pub static SYSCALL_TABLE: OnceCell<FxHashMap<String, u32>> = OnceCell::new();
-
-/// Immediately raises a non-continuable exception with the given code.
-/// 
-/// This is used to fault crisply when any PE-parsing step fails.
-#[inline(always)]
-unsafe fn critical_fault(code: ULONG) -> ! {
-    // EXCEPTION_NONCONTINUABLE = 0x1
-    RaiseException(code, 0x1, 0, std::ptr::null());
-    std::hint::unreachable_unchecked()
-}
 
 /// Translates an RVA into a usable pointer inside a mapped PE image, or faults if invalid.
 /// 
@@ -55,13 +49,15 @@ unsafe fn rva_to_ptr_or_fault(
     rva: usize,
     size: usize,
     sections: &[IMAGE_SECTION_HEADER],
-    fault_code: ULONG,
-) -> *const u8 {
+    fault_code: u32,
+) -> Result<*const u8, u32> {
     if base.is_null() {
-        critical_fault(fault_code);
+        printdev!("base is null");
+        return Err(fault_code);
     }
     if rva >= size {
-        critical_fault(fault_code + 1);
+        printdev!("rva {:X} out of bounds", rva);
+        return Err(fault_code + 1);
     }
 
     for sec in sections {
@@ -70,13 +66,13 @@ unsafe fn rva_to_ptr_or_fault(
         if rva >= virt_start && rva < virt_start + virt_size {
             let file_offset = sec.PointerToRawData as usize + (rva - virt_start);
             if file_offset < size {
-                return base.add(file_offset);
+                return Ok(base.add(file_offset));
             }
         }
     }
 
-    // RVA not covered by any section
-    critical_fault(fault_code + 2);
+    printdev!("rva not covered by any section");
+    Err(fault_code + 2)
 }
 
 /// Extracts syscall numbers from a mapped `ntdll.dll` image.
@@ -96,61 +92,59 @@ unsafe fn rva_to_ptr_or_fault(
 /// # Safety
 /// - Caller must guarantee that `ntdll` is valid, readable, and represents a System32 PE.
 /// - Must be called at most once per process lifetime.
-pub unsafe fn extract_syscalls(ntdll: *const u8, size: usize) {
-    // null or zero size → fault
+pub unsafe fn extract_syscalls(ntdll: *const u8, size: usize) -> Result<(), u32> {
     if ntdll.is_null() {
-        critical_fault(0xDEAD_0001);
+        printdev!("ntdll ptr is null");
+        return Err(AB_NOT_INIT);
     }
     if size == 0 {
-        critical_fault(0xDEAD_0002);
+        printdev!("image size is zero");
+        return Err(AB_NULL);
     }
     if SYSCALL_TABLE.get().is_some() {
-        critical_fault(0xDEAD_0003);
+        printdev!("syscall table already initialized");
+        return Err(AB_ALREADY_INIT);
     }
 
-    // DOS header
     let dos = &*(ntdll as *const IMAGE_DOS_HEADER);
     if dos.e_magic != 0x5A4D {
-        critical_fault(0xDEAD_0010);
+        printdev!("invalid DOS header");
+        return Err(AB_INVALID_IMAGE);
     }
 
-    // NT headers
     let nt_offset = dos.e_lfanew as usize;
     let nt = &*(ntdll.add(nt_offset) as *const IMAGE_NT_HEADERS);
     if nt.Signature != 0x0000_4550 {
-        critical_fault(0xDEAD_0011);
+        printdev!("invalid NT signature");
+        return Err(AB_INVALID_IMAGE);
     }
 
-    // Section headers
     let num_secs = nt.FileHeader.NumberOfSections as usize;
     let secs_ptr = ntdll
         .add(nt_offset + std::mem::size_of::<IMAGE_NT_HEADERS>())
         as *const IMAGE_SECTION_HEADER;
     let sections = slice::from_raw_parts(secs_ptr, num_secs);
 
-    // Export directory
     let export_va = nt.OptionalHeader.DataDirectory[0].VirtualAddress as usize;
-    let export_ptr = rva_to_ptr_or_fault(ntdll, export_va, size, sections, 0xDEAD_0100)
+    let export_ptr = rva_to_ptr_or_fault(ntdll, export_va, size, sections, AB_EXPORT_FAIL)?
         as *const IMAGE_EXPORT_DIRECTORY;
     let export = &*export_ptr;
 
-    // Tables & counts
     let name_count = export.NumberOfNames as usize;
     let func_count = export.NumberOfFunctions as usize;
 
-    let names = rva_to_ptr_or_fault(ntdll, export.AddressOfNames as usize, size, sections, 0xDEAD_0101)
+    let names = rva_to_ptr_or_fault(ntdll, export.AddressOfNames as usize, size, sections, AB_EXPORT_FAIL + 1)?
         as *const u32;
-    let ords = rva_to_ptr_or_fault(ntdll, export.AddressOfNameOrdinals as usize, size, sections, 0xDEAD_0102)
+    let ords = rva_to_ptr_or_fault(ntdll, export.AddressOfNameOrdinals as usize, size, sections, AB_EXPORT_FAIL + 2)?
         as *const u16;
-    let funcs = rva_to_ptr_or_fault(ntdll, export.AddressOfFunctions as usize, size, sections, 0xDEAD_0103)
+    let funcs = rva_to_ptr_or_fault(ntdll, export.AddressOfFunctions as usize, size, sections, AB_EXPORT_FAIL + 3)?
         as *const u32;
 
-    // Build syscall map
     let mut map = FxHashMap::with_capacity_and_hasher(name_count, Default::default());
     for i in 0..name_count {
         let name_rva = std::ptr::read_unaligned(names.add(i)) as usize;
-        let name_ptr =
-            rva_to_ptr_or_fault(ntdll, name_rva, size, sections, 0xDEAD_0200) as *const c_char;
+        let name_ptr = rva_to_ptr_or_fault(ntdll, name_rva, size, sections, AB_BAD_SYSCALL)?
+            as *const c_char;
         let name_bytes = CStr::from_ptr(name_ptr).to_bytes();
         if name_bytes.len() < 3 || &name_bytes[..2] != b"Nt" {
             continue;
@@ -158,10 +152,12 @@ pub unsafe fn extract_syscalls(ntdll: *const u8, size: usize) {
 
         let ord = std::ptr::read_unaligned(ords.add(i)) as usize;
         if ord >= func_count {
-            critical_fault(0xDEAD_0201);
+            printdev!("ordinal {} out of bounds", ord);
+            return Err(AB_BAD_SYSCALL + 1);
         }
+
         let func_rva = std::ptr::read_unaligned(funcs.add(ord)) as usize;
-        let sig_ptr = rva_to_ptr_or_fault(ntdll, func_rva, size, sections, 0xDEAD_0202);
+        let sig_ptr = rva_to_ptr_or_fault(ntdll, func_rva, size, sections, AB_BAD_SYSCALL + 2)?;
         let sig = slice::from_raw_parts(sig_ptr, 8);
 
         let valid = matches!(
@@ -179,10 +175,14 @@ pub unsafe fn extract_syscalls(ntdll: *const u8, size: usize) {
         map.insert(key, ssn);
     }
 
-    // Cache globally or fault if already set
     if SYSCALL_TABLE.set(map).is_err() {
-        critical_fault(0xDEAD_0FFF);
+        printdev!("syscall table already set again?");
+        return Err(AB_ALREADY_INIT);
     }
+
+    drop_ntdll();
+
+    Ok(())  
 }
 
 /// Returns a reference to the global syscall table, if initialized.

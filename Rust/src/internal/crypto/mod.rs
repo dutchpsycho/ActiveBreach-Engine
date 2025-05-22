@@ -1,2 +1,2 @@
-pub mod coder;
 pub mod lea;
+pub mod encrypted;

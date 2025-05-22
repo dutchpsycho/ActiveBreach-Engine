@@ -168,7 +168,36 @@ impl SyscallTest {
 }
 
 fn main() {
+
+    use std::{
+        io::{self, Write},
+        ptr::null_mut,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        },
+        thread,
+        time::Duration,
+    };
+    use winapi::{
+        shared::{
+            minwindef::ULONG,
+            ntdef::{HANDLE, OBJECT_ATTRIBUTES},
+        },
+        um::{
+            processthreadsapi::{GetCurrentThreadId, OpenThread},
+            winnt::THREAD_ALL_ACCESS,
+        },
+    };
+
+    #[repr(C)]
+struct CLIENT_ID {
+    UniqueProcess: winapi::shared::ntdef::HANDLE,
+    UniqueThread: winapi::shared::ntdef::HANDLE,
+}
+
     
+
     if let Some(table) = get_syscall_table() {
         for (name, id) in table.iter() {
             println!("{:<32} = 0x{:X}", name, id);
@@ -178,9 +207,9 @@ fn main() {
     }
 
     let self_process = (-1isize) as HANDLE;
-    let self_thread  = (-2isize) as HANDLE;
+    let self_thread = (-2isize) as HANDLE;
 
-    // spawn helper thread to get a real TID
+    // ===== Spawn helper to get real TID (not psuedo) =====
     let (tx, rx) = mpsc::channel();
     let keepalive = Arc::new(AtomicBool::new(true));
     let ka_clone = keepalive.clone();
@@ -193,7 +222,7 @@ fn main() {
     });
     let real_tid = rx.recv().unwrap();
 
-    // build the suite of tests
+    // ===== Syscall test suite =====
     let tests = vec![
         SyscallTest {
             name: "NtQueryInformationThread",
@@ -214,8 +243,8 @@ fn main() {
                 NtQueryInformationThread(
                     self_thread,
                     0,
-                    buf.as_mut_ptr() as LPVOID,
-                    buf.len() as ULONG,
+                    buf.as_mut_ptr() as _,
+                    buf.len() as _,
                     &mut len,
                 )
             }),
@@ -239,17 +268,15 @@ fn main() {
                 NtQueryInformationProcess(
                     self_process,
                     0,
-                    buf.as_mut_ptr() as LPVOID,
-                    buf.len() as ULONG,
+                    buf.as_mut_ptr() as _,
+                    buf.len() as _,
                     &mut len,
                 )
             }),
         },
         SyscallTest {
             name: "NtSetInformationThread",
-            ab_args: Box::new(move || {
-                vec![self_thread as usize, 0x11, null_mut::<u8>() as usize, 0]
-            }),
+            ab_args: Box::new(move || vec![self_thread as usize, 0x11, 0, 0]),
             direct_call: Box::new(move || unsafe {
                 NtSetInformationThread(self_thread, 0x11, null_mut(), 0)
             }),
@@ -326,40 +353,56 @@ fn main() {
         },
     ];
 
-    // print header
+    // ===== Run benchmarks =====
     println!("\n\n=== Benchmark Summary ===");
     println!(
-        "{:<25} {:>10} {:>12} {:>12} {:>12}",
-        "Syscall", "Native ms", "AB ms", "Overhead", "Runs"
+        "{:<25} {:>10} {:>12} {:>12} {:>12}  {}",
+        "Syscall", "Native ms", "AB ms", "Overhead", "Runs", "Match?"
     );
 
-    // run all stress levels
     for level in &[StressLevel::Low, StressLevel::Medium, StressLevel::High] {
         let runs = level.runs();
+
         for test in &tests {
-            let native = test.measure(runs, || (test.direct_call)());
-            let ab = test.measure(runs, || unsafe {
-                ab_call(test.name, &(test.ab_args)()) as ULONG
+            let mut native_status = 0;
+            let native = test.measure(runs, || {
+                let status = (test.direct_call)();
+                native_status = status;
+                status
             });
+
+            let mut ab_status = 0;
+            let ab = test.measure(runs, || unsafe {
+                let status = ab_call(test.name, &(test.ab_args)()) as ULONG;
+                ab_status = status;
+                status
+            });
+
+            let match_text = if native_status == ab_status {
+                "✓"
+            } else {
+                "✗"
+            };
 
             let overhead = (ab.as_secs_f64() / native.as_secs_f64() - 1.0) * 100.0;
             println!(
-                "{:<25} {:>10.3} {:>12.3} {:>11.1}% {:>12}",
+                "{:<25} {:>10.3} {:>12.3} {:>11.1}% {:>12}  {}",
                 format!("{}({})", test.name, level.name()),
                 native.as_secs_f64() * 1_000.0,
                 ab.as_secs_f64() * 1_000.0,
                 overhead,
-                runs
+                runs,
+                match_text
             );
         }
     }
 
-    // teardown helper
+    // ===== Teardown helper =====
     keepalive.store(false, Ordering::Relaxed);
     let _ = helper.join();
 
-    // hang open
     println!("\nPress <Enter> to exit…");
+    let _ = io::stdout().flush();
     let mut input = String::new();
-    let _ = std::io::stdin().read_line(&mut input);
+    let _ = io::stdin().read_line(&mut input);
 }

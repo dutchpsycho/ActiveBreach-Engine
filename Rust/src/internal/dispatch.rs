@@ -18,12 +18,14 @@
 //! The system assumes this thread is spawned **once** and remains alive for the duration of use.
 
 use std::mem::MaybeUninit;
-use std::ptr::null_mut;
 use std::sync::atomic::{AtomicU32, Ordering, AtomicBool};
-use crate::internal::stub::G_STUB_POOL;
+
 use winapi::um::memoryapi::VirtualProtect;
-use crate::internal::stub::STUB_SIZE;
 use winapi::um::winnt::{PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_READ};
+
+use crate::internal::stub::G_STUB_POOL;
+use crate::internal::stub::STUB_SIZE;
+use crate::printdev;
 
 /// Operation frame shared between the caller and dispatcher thread.
 ///
@@ -87,15 +89,15 @@ pub static G_READY: AtomicBool = AtomicBool::new(false);
 /// It assumes `G_OPFRAME` is uninitialized and will remain in memory.
 ///
 pub unsafe extern "system" fn thread_proc(_: *mut winapi::ctypes::c_void) -> u32 {
-    crate::internal::thread::nuke_teb_soft();
-
+    
     G_OPFRAME.write(ABOpFrame::default());
     G_READY.store(true, Ordering::Release);
+
+    printdev!("opframe initialized, ready flag set");
 
     let frame = &mut *G_OPFRAME.as_mut_ptr();
 
     loop {
-        // spin-wait until syscall request
         if frame.status.load(Ordering::Acquire) != 1 {
             std::thread::yield_now();
             continue;
@@ -104,41 +106,45 @@ pub unsafe extern "system" fn thread_proc(_: *mut winapi::ctypes::c_void) -> u32
         let stub = match G_STUB_POOL.acquire() {
             Some(ptr) if !ptr.is_null() => ptr,
             _ => {
-                eprintln!("[AB] failed to acquire stub — skipping frame");
+                printdev!("failed to acquire stub — skipping frame");
                 continue;
             }
         };
 
-        // alignment and pointer sanity check
-        debug_assert_eq!(stub as usize % 16, 0, "[AB] stub alignment fail");
+        if stub as usize % 16 != 0 {
+            printdev!("stub alignment fail: {:p}", stub);
+            G_STUB_POOL.release(stub);
+            continue;
+        }
 
         let ssn_ptr = stub.add(4) as *mut u32;
         if ssn_ptr.is_null() {
-            eprintln!("[AB] invalid SSN ptr (null)");
+            printdev!("invalid SSN ptr (null)");
             G_STUB_POOL.release(stub);
             continue;
         }
 
         let mut old = 0;
         if VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old) == 0 {
-            eprintln!("[AB] failed to set stub RWX before SSN write");
+            printdev!("failed to set stub RWX before SSN write");
             G_STUB_POOL.release(stub);
             continue;
         }
 
-        // patch syscall number at offset +4
+        // printdev!("stub RWX set — writing syscall ID: {}", frame.syscall_id);
+
         ssn_ptr.write_volatile(frame.syscall_id);
 
-        // revert back to RX (cleaner in scans)
         if VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READ, &mut old) == 0 {
-            eprintln!("[AB] failed to restore stub RX after SSN write");
+            printdev!("failed to restore stub RX after SSN write");
         }
 
-        // transmute to syscall function
         let fn_ptr: ABStubFn = std::mem::transmute(stub);
 
         let mut padded = [0usize; 16];
         padded[..frame.arg_count].copy_from_slice(&frame.args[..frame.arg_count]);
+
+        // printdev!("executing syscall stub with {} args", frame.arg_count);
 
         let ret = fn_ptr(
             padded[0], padded[1], padded[2], padded[3],
@@ -146,6 +152,8 @@ pub unsafe extern "system" fn thread_proc(_: *mut winapi::ctypes::c_void) -> u32
             padded[8], padded[9], padded[10], padded[11],
             padded[12], padded[13], padded[14], padded[15],
         );
+
+        // printdev!("syscall returned: 0x{:X}", ret);
 
         frame.ret = ret;
         frame.status.store(2, Ordering::Release);

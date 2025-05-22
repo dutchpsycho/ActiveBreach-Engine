@@ -1,6 +1,8 @@
 pub mod crypto;
-pub mod file_buffer;
+
+pub mod mapper;
 pub mod exports;
 pub mod stub;
 pub mod dispatch;
 pub mod thread;
+pub mod diagnostics;

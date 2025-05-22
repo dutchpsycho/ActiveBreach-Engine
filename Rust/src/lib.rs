@@ -39,11 +39,13 @@
 
 #![allow(non_snake_case)]
 #![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(static_mut_refs)]
+#![allow(non_upper_case_globals)]
  
- pub mod internal;
- 
- use std::ptr::{null_mut, null};
- use winapi::um::{handleapi::CloseHandle, processthreadsapi::CreateThread};
+pub mod internal;
+
+use crate::internal::diagnostics::*;
 
 /// Launches the ActiveBreach syscall dispatcher thread and loads the syscall table.
 ///
@@ -67,7 +69,7 @@
 ///     activebreach_launch().expect("failed to init");
 /// }
 /// ```
-pub unsafe fn activebreach_launch() -> Result<(), &'static str> {
+pub unsafe fn activebreach_launch() -> Result<(), u32> {
     internal::thread::spawn_ab_thread()
 }
 
@@ -102,32 +104,53 @@ pub unsafe fn activebreach_launch() -> Result<(), &'static str> {
 /// }
 /// ```
 pub unsafe fn ab_call(name: &str, args: &[usize]) -> usize {
-    if name.len() >= 64 { panic!("ab_call: name too long"); }
-    if args.len() > 16 { panic!("ab_call: too many args"); }
-
-    if !internal::dispatch::G_READY.load(std::sync::atomic::Ordering::Acquire) {
-        panic!("ab_call: dispatcher not ready");
+    if name.len() >= 64 {
+        return AB_DISPATCH_NAME_TOO_LONG as usize;
+    }
+    if args.len() > 16 {
+        return AB_DISPATCH_ARG_TOO_MANY as usize;
     }
 
-    let tbl = internal::exports::SYSCALL_TABLE.get()
-        .expect("ab_call: syscall table not ready");
+    if !internal::dispatch::G_READY.load(std::sync::atomic::Ordering::Acquire) {
+        return AB_DISPATCH_NOT_READY as usize;
+    }
 
-    let ssn = *tbl.get(name)
-        .unwrap_or_else(|| panic!("ab_call: syscall not found: {name}"));
+    let tbl = match internal::exports::SYSCALL_TABLE.get() {
+        Some(t) => t,
+        None => return AB_DISPATCH_TABLE_MISSING as usize,
+    };
+
+    let ssn = match tbl.get(name) {
+        Some(n) => *n,
+        None => return AB_DISPATCH_SYSCALL_MISSING as usize,
+    };
 
     let op = internal::dispatch::G_OPFRAME.as_mut_ptr();
     let frame = &mut *op;
 
-    while frame.status.load(std::sync::atomic::Ordering::Acquire) != 0 {}
+    let mut spin = 0;
+    while frame.status.load(std::sync::atomic::Ordering::Acquire) != 0 {
+        spin += 1;
+        if spin > 100_000 {
+            return AB_DISPATCH_FRAME_TIMEOUT as usize;
+        }
+    }
 
     frame.syscall_id = ssn;
     frame.arg_count = args.len();
     frame.args[..args.len()].copy_from_slice(args);
     frame.status.store(1, std::sync::atomic::Ordering::Release);
 
-    while frame.status.load(std::sync::atomic::Ordering::Acquire) != 2 {}
+    let mut spin = 0;
+    while frame.status.load(std::sync::atomic::Ordering::Acquire) != 2 {
+        spin += 1;
+        if spin > 100_000 {
+            return AB_DISPATCH_FRAME_TIMEOUT as usize;
+        }
+    }
 
     let ret = frame.ret;
     frame.status.store(0, std::sync::atomic::Ordering::Release);
+    
     ret
 }

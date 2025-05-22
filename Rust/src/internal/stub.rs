@@ -10,6 +10,8 @@ use winapi::um::winnt::{
 };
 
 use crate::internal::crypto::lea::{lea_encrypt_block, lea_decrypt_block};
+use crate::internal::diagnostics::*;
+
 use lazy_static::lazy_static;
 
 /// Size of a syscall stub in bytes.
@@ -61,46 +63,47 @@ impl AbRingAllocator {
     pub fn init() -> Self {
         let mut slots: [MaybeUninit<StubSlot>; NUM_STUBS] =
             std::array::from_fn(|_| MaybeUninit::uninit());
-
+    
         for i in 0..NUM_STUBS {
-            let stub = Self::alloc_stub();
+            let stub = Self::alloc_stub().unwrap(); // or bubble result if you want
             unsafe {
                 Self::write_template(stub);
-                lea_encrypt_block(stub, STUB_SIZE);
-
+                lea_encrypt_block(stub, STUB_SIZE); // assume no fail
+    
                 let mut old = 0;
-                VirtualProtect(stub as _, STUB_SIZE, PAGE_NOACCESS, &mut old);
+                let ok = VirtualProtect(stub as _, STUB_SIZE, PAGE_NOACCESS, &mut old);
+                debug_assert!(ok != 0);
             }
-
+    
             slots[i] = MaybeUninit::new(StubSlot {
                 addr: stub,
                 encrypted: AtomicBool::new(true),
             });
         }
-
+    
         let slots = unsafe { std::mem::transmute::<_, [StubSlot; NUM_STUBS]>(slots) };
-
+    
         Self {
             slots,
             index: AtomicUsize::new(0),
         }
-    }
+    }    
 
     /// Allocates RWX memory for a new syscall stub, with 16-byte alignment.
     ///
     /// Panics if the allocation fails.
     #[inline(always)]
-    fn alloc_stub() -> *mut u8 {
+    fn alloc_stub() -> Result<*mut u8, u32> {
         let raw = unsafe {
             VirtualAlloc(null_mut(), STUB_SIZE + 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
         } as usize;
-
+    
         if raw == 0 {
-            panic!("AbRingAllocator: stub allocation failed");
+            return Err(AB_STUB_ALLOC_FAIL);
         }
-
+    
         let aligned = (raw + 15) & !15;
-        aligned as *mut u8
+        Ok(aligned as *mut u8)
     }
 
     /// Writes the syscall stub template to a newly allocated buffer.
