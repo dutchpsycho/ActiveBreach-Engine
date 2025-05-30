@@ -478,75 +478,99 @@ namespace {
  */
 extern "C" void ActiveBreach_launch(const char* notify) {
     try {
-        // Extract and stub
+        // Extract syscall table and build persistent stubs
         auto tbl = _ExtractSyscalls();
         _g_ab_internal._BuildStubs(tbl);
 
-        // create init event
+        // init sync event
         _g_abInitializedEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
         if (!_g_abInitializedEvent)
             throw std::runtime_error("init event failed");
 
-        // locate required SSNs by hash
+        // locate hashes
         constexpr uint64_t h_cte = 0xbcc7c24bdcfe64d3;  // NtCreateThreadEx
         constexpr uint64_t h_sit = 0xee9ec0b2e2fe64f5;  // NtSetInformationThread
-        uint32_t ssn_cte=0, ssn_sit=0;
-        for (auto const& kv: tbl) {
+        uint32_t ssn_cte = 0, ssn_sit = 0;
+
+        for (const auto& kv : tbl) {
             uint64_t h = _ab_hash(kv.first.c_str());
-            if      (h==h_cte) ssn_cte = kv.second;
-            else if (h==h_sit) ssn_sit = kv.second;
+            if (h == h_cte) ssn_cte = kv.second;
+            else if (h == h_sit) ssn_sit = kv.second;
         }
-        if (!ssn_cte||!ssn_sit)
+
+        if (!ssn_cte || !ssn_sit)
             throw std::runtime_error("required services not found");
 
-        // build temp stubs for thread migration
-        auto make_stub = [&](uint32_t ssn)->void* {
+        // make stub helper (RX memory)
+        auto make_stub = [&](uint32_t ssn) -> void* {
             uint8_t tmp[16];
             _decrypt_stub(tmp, encrypted_stub, aes_key);
-            *(uint32_t*)(tmp+4)=ssn;
-            void* s = VirtualAlloc(nullptr,0x1000,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
-            if (!s) return nullptr;
-            memcpy(s,tmp,16);
-            return s;
-        };
+            *(uint32_t*)(tmp + 4) = ssn;
 
-        // create a real thread via stub
+            void* stub = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if (!stub) return nullptr;
+
+            memcpy(stub, tmp, 16);
+
+            DWORD old = 0;
+            if (!VirtualProtect(stub, 0x1000, PAGE_EXECUTE_READ, &old)) {
+                VirtualFree(stub, 0, MEM_RELEASE);
+                return nullptr;
+            }
+
+            return stub;
+            };
+
+        // build both syscall stubs
         void* stub_cte = make_stub(ssn_cte);
-        if (!stub_cte) throw std::runtime_error("stub_cte alloc failed");
+        void* stub_sit = make_stub(ssn_sit);
 
+        if (!stub_cte)
+            throw std::runtime_error("stub_cte alloc failed");
+
+        // create dispatcher thread
         auto NtCreateThreadEx = (NtCreateThreadEx_t)stub_cte;
-        HANDLE hThread=nullptr;
+        HANDLE hThread = nullptr;
         NTSTATUS st = NtCreateThreadEx(
             &hThread, THREAD_ALL_ACCESS, nullptr,
             (HANDLE)(LONG_PTR)-1, _ActiveBreach_ThreadProc,
-            nullptr, 0,0,0,0,nullptr
+            nullptr, 0, 0, 0, 0, nullptr
         );
-        if (st<0||!hThread) throw std::runtime_error("CreateThread failed");
 
-        // hide thread from debugger via SetInformationThread
-        void* stub_sit = make_stub(ssn_sit);
+        if (st < 0 || !hThread)
+            throw std::runtime_error("CreateThread failed");
+
+        // hide thread from debugger (only if stub_sit worked)
         if (stub_sit) {
-            using NtSIT_t = NTSTATUS(NTAPI*)(HANDLE,ULONG,PVOID,ULONG);
+            using NtSIT_t = NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG);
             auto NtSetInformationThread = (NtSIT_t)stub_sit;
-            constexpr ULONG HideFlag = 0x11;  
+            constexpr ULONG HideFlag = 0x11;
             NtSetInformationThread(hThread, HideFlag, nullptr, 0);
-            SecureZeroMemory(stub_sit,0x1000);
-            VirtualFree(stub_sit,0,MEM_RELEASE);
+
+            // no SecureZeroMemory — page may be RX/EX-only on Win Pro
+            VirtualFree(stub_sit, 0, MEM_RELEASE);
+            stub_sit = nullptr;
         }
 
-        // wait for dispatcher thread ready
+        // wait for thread to signal ready
         WaitForSingleObject(_g_abInitializedEvent, INFINITE);
-        SecureZeroMemory(stub_cte,0x1000);
-        VirtualFree(stub_cte,0,MEM_RELEASE);
-        CloseHandle(_g_abInitializedEvent);
-        _g_abInitializedEvent=nullptr;
-        CloseHandle(hThread);
 
-        if (notify && strcmp(notify,"LMK")==0)
-            std::cout<<"[AB] ACTIVEBREACH OPERATIONAL\n";
+        if (stub_cte) {
+            VirtualFree(stub_cte, 0, MEM_RELEASE); // no memset
+            stub_cte = nullptr;
+        }
+
+        CloseHandle(_g_abInitializedEvent);
+        _g_abInitializedEvent = nullptr;
+
+        CloseHandle(hThread);
+        hThread = nullptr;
+
+        if (notify && strcmp(notify, "LMK") == 0)
+            std::cout << "[AB] ACTIVEBREACH OPERATIONAL\n";
     }
-    catch (std::exception const& e) {
-        std::cerr<<"ActiveBreach_launch err: "<<e.what()<<std::endl;
+    catch (const std::exception& e) {
+        std::cerr << "ActiveBreach_launch err: " << e.what() << std::endl;
         exit(1);
     }
 }
