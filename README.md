@@ -10,7 +10,7 @@ Inspired by [MDSEC](https://www.mdsec.co.uk/2020/12/bypassing-user-mode-hooks-an
 
 ### Why?
 
-Most public syscall tooling falls into one of two categories:
+Most public syscall tooling falls into one of two models:
 
 1. **Global Unhooking:**  
    Nuking all usermode protections via page remapping or ntdll restoration. Effective short-term — but loud, risky, and easily behaviorally profiled by modern EDRs/AC's.
