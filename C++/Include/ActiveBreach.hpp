@@ -47,12 +47,13 @@ constexpr DWORD ACTIVEBREACH_SYSCALL_RETURNMODIFIED = 0xE0001001;
 constexpr DWORD ACTIVEBREACH_SYSCALL_STACKPTRMODIFIED = 0xE0001002;
 constexpr DWORD ACTIVEBREACH_SYSCALL_LONGSYSCALL = 0xE0001003;
 
+constexpr DWORD ACTIVEBREACH_FLOWGUARD_IDENTITY_MISMATCH = 0xE0002001;
+constexpr DWORD ACTIVEBREACH_FLOWGUARD_REMOTE_EXECUTION = 0xE0002002;
+
 constexpr uint64_t SYSCALL_TIME_THRESHOLD = 50000000ULL;
 
 struct _SyscallState {
     uint64_t start_time;
-    void* stack_ptr;
-    void* ret_addr;
 };
 
 #ifndef STATUS_SUCCESS
@@ -97,24 +98,41 @@ typedef struct _PEB {
     BYTE BeingDebugged;
     BYTE Reserved2[1];
     PVOID Reserved3[2];
-    PVOID Ldr;
-    PVOID ProcessParameters;
-    BYTE Reserved4[104];
-    PVOID Reserved5[52];
-    PVOID PostProcessInitRoutine;
-    BYTE Reserved6[128];
-    PVOID Reserved7[1];
-    ULONG SessionId;
+    PVOID SubSystemData;
+    PVOID ProcessHeap;
+    PVOID FastPebLock;
+    PVOID AtlThunkSListPtr;
+    PVOID IFEOKey;
+    ULONG CrossProcessFlags;
+    ULONG NtGlobalFlag;
+    PVOID KernelCallbackTable;
+    ULONG SystemReserved;
+    ULONG AtlThunkSListPtr32;
+    PVOID ApiSetMap;
+    PVOID ImageBaseAddress;
 } PEB, * PPEB;
 
+typedef struct _CLIENT_ID {
+    PVOID UniqueProcess;
+    PVOID UniqueThread;
+} CLIENT_ID, * PCLIENT_ID;
+
+typedef struct _TEB {
+    NT_TIB NtTib;
+    PVOID EnvironmentPointer;
+    CLIENT_ID ClientId;
+} TEB, * PTEB;
+
 /*
- * ActiveBreach_launch:
- * Launches the global ActiveBreach handler
- * Internally, it maps ntdll.dll & extracts ssns,builds syscall stubs, and sets up the ActiveBreach system
+    * ActiveBreach_launch:
+    * Launches the global ActiveBreach handler
+    * Internally, it maps ntdll.dll & extracts ssns,builds syscall stubs, and sets up the ActiveBreach system
 */
 
-    void ActiveBreach_launch(const char* notify = nullptr);
-	void* _ab_get_stub(const char* name);
+void ActiveBreach_launch();
+void* _ab_get_stub(const char* name);
+void* ab_create_ephemeral_stub(uint32_t ssn, DWORD prot = PAGE_EXECUTE_READ);
+uint32_t ab_violation_count();
 
 #ifdef __cplusplus
 }

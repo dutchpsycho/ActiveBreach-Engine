@@ -1,5 +1,7 @@
 ﻿#include "../Include/ActiveBreach.hpp"
 
+#include "Suite/page.h"
+
 #include <Windows.h>
 #include <iostream>
 
@@ -17,8 +19,10 @@ typedef NTSTATUS(NTAPI* NtQuerySystemInformation_t)(
     );
 
 int main() {
-    ActiveBreach_launch("LMK");
+    ActiveBreach_launch();
     std::cout << "=== ActiveBreach Test Suite (C++) ===\n\n";
+
+    TestSectionMapping();
 
     // -- test 1: NtAllocateVirtualMemory
     PVOID base = nullptr;
@@ -67,10 +71,13 @@ int main() {
     }
 
     // -- test 3: NtQuerySystemInformation via ab_call_fn_cpp
+    // -- test 3: NtQuerySystemInformation via ab_call_fn_cpp
     ULONG returnLength = 0;
     SIZE_T bufferSize = 0x1000;
     PVOID infoBuf = nullptr;
     NTSTATUS qsi_status;
+
+    const ULONG infoClass = 5; // SystemProcessInformation
 
     do {
         if (infoBuf) VirtualFree(infoBuf, 0, MEM_RELEASE);
@@ -81,8 +88,12 @@ int main() {
             return 1;
         }
 
+        // sizeof...(args) == 4 is inferred automatically here
         qsi_status = ab_call_fn_cpp<NTSTATUS>("NtQuerySystemInformation",
-            5, infoBuf, (ULONG)bufferSize, &returnLength);
+            infoClass,
+            infoBuf,
+            (ULONG)bufferSize,
+            &returnLength);
 
         if (qsi_status == STATUS_INFO_LENGTH_MISMATCH)
             bufferSize *= 2;

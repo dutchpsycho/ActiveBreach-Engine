@@ -9,6 +9,9 @@
       <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
       <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
     </Filter>
+    <Filter Include="Core\Suite">
+      <UniqueIdentifier>{6b53bced-77c4-4d0a-998b-f0f37c6fd4af}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Main.cpp">
@@ -17,10 +20,16 @@
     <ClCompile Include="..\Include\ActiveBreach.cpp">
       <Filter>Include</Filter>
     </ClCompile>
+    <ClCompile Include="Suite\page.cpp">
+      <Filter>Core\Suite</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\Include\ActiveBreach.hpp">
       <Filter>Include</Filter>
+    </ClInclude>
+    <ClInclude Include="Suite\page.h">
+      <Filter>Core\Suite</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>
