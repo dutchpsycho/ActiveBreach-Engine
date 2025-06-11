@@ -26,7 +26,7 @@ Rather than restoring overwritten memory, touching hooks or elevating to the ker
 
 ### How does ActiveBreach work?
 
-Instead of routing throug ``ntdll.dll``, which is almost 100% of the time hooked, ActiveBreach sets up its own layer, replicating the Nt layer to execute syscalls directly to the Kernel, without touching any other API's on the way. This means any Nt* call you execute via ActiveBreach will bypass any usermode (Including remote process's, or global) hooks. If you'd like a more in-depth explanation on actual hooking, see > [TECH.md](TECH.md)
+Instead of routing through ``ntdll.dll``, which is almost 100% of the time hooked, ActiveBreach sets up its own layer, replicating the Nt* layer to execute syscalls directly to the Kernel, without touching any other API's on the way. This means any Nt* call you execute via ActiveBreach will bypass any usermode (Including remote process's, or global) hooks. If you'd like a more in-depth explanation on actual hooking, see > [TECH.md](TECH.md)
 
 ---
 
@@ -34,19 +34,19 @@ Instead of routing throug ``ntdll.dll``, which is almost 100% of the time hooked
 
 #### C Edition
 
-- Smallest, most basic version. Can be included in any C/C++ project on MSVC, simply add the .c/h files & compile.
-- Does not include encryption or encoding of strings, runtime stub building, operates on the same core ideas but not fully fledged.
-- Fastest of the 3, but the real speed difference is minimal when you're considering these are syscalls.
+- Extremely small and basic, intended for use in small projects / implants that need speed & size
 
 ---
 
 #### C++ Edition
 
-- Larger implementation, RAII, leveraged C++ language features
-- Cane be included on any C++ project on MSVC, simply add the .cpp/hpp & compile.
-- Supports C++ 14&20, MSVC
-- Encodes & Decrypts strings and builds stubs from encrypted bytes
-- Larger, more secure
+- Switches from single-threaded model to ThreadPooling
+- Includes Anti-Tamper (AntiBreach) suite
+- Includes Debugging suite
+- Leverages C++ 17/20 features heavily
+- Uses SIMD/AVX
+- Uses encrypted stub templates and encoded string values
+- Includes preprocessor macros
 
 #### Rust Edition
 
