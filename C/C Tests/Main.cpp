@@ -6,7 +6,7 @@
 int main() {
     ActiveBreach_launch();
 
-    std::printf("=== ActiveBreach Test Harness ===\n\n");
+    std::printf("=== ActiveBreach Test Suite (C) ===\n\n");
 
     // -- test 1: memory allocation via C++
     if (test_vmem() == STATUS_SUCCESS)

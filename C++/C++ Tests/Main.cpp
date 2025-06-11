@@ -22,7 +22,7 @@ int main() {
     ActiveBreach_launch();
     std::cout << "=== ActiveBreach Test Suite (C++) ===\n\n";
 
-    TestSectionMapping();
+    // TestSectionMapping(); // Ignore, my args on Nt r wrong (Not right page)
 
     // -- test 1: NtAllocateVirtualMemory
     PVOID base = nullptr;

@@ -18,7 +18,7 @@
 
 ### C++
 ```cpp
-ActiveBreach_launch("LMK");
+ActiveBreach_launch();
 ```
 
 ### C
