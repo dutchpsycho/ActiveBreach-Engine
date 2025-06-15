@@ -4,6 +4,8 @@
 **cargo.lock
 /live
 
+rust/activebreach.yar
+
 # Visual Studio
 .vs/
 *.user

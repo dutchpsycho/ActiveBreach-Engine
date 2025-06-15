@@ -1,3 +1,6 @@
 [submodule "RivBreach"]
 	path = RivBreach
 	url = https://github.com/dutchpsycho/rivbreach
+[submodule "SysQuanta"]
+	path = SysQuanta
+	url = https://github.com/dutchpsycho/SysQuanta
