@@ -10,8 +10,8 @@ use winapi::shared::ntdef::{HANDLE, NTSTATUS, PVOID};
 use winapi::um::{
     handleapi::CloseHandle,
     libloaderapi::GetModuleHandleA,
-    memoryapi::{VirtualAlloc, VirtualProtect},
-    winnt::{MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE},
+    memoryapi::{VirtualAlloc, VirtualProtect, VirtualFree},
+    winnt::{MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_NOACCESS, MEM_RELEASE},
 };
 
 use crate::internal::{dispatch, exports, mapper};
@@ -59,8 +59,37 @@ pub unsafe fn spawn_ab_thread() -> Result<(), u32> {
         .get("NtCreateThreadEx")
         .ok_or(AB_THREAD_NTCREATE_MISSING)?;
 
-    let syscall = direct_syscall_stub(ssn)
-        .ok_or(AB_THREAD_STUB_ALLOC_FAIL)?;
+    // Manually track the stub pointer so we can wipe it later
+    let stub_ptr = VirtualAlloc(
+        null_mut(), 0x20,
+        MEM_COMMIT | MEM_RESERVE,
+        PAGE_EXECUTE_READWRITE,
+    ) as *mut u8;
+
+    if stub_ptr.is_null() {
+        return Err(AB_THREAD_STUB_ALLOC_FAIL);
+    }
+
+    let tmpl: [u8; 11] = [
+        0x4C, 0x8B, 0xD1,
+        0xB8,
+        (ssn & 0xFF) as u8,
+        ((ssn >> 8) & 0xFF) as u8,
+        ((ssn >> 16) & 0xFF) as u8,
+        ((ssn >> 24) & 0xFF) as u8,
+        0x0F, 0x05,
+        0xC3,
+    ];
+    std::ptr::copy_nonoverlapping(tmpl.as_ptr(), stub_ptr, tmpl.len());
+
+    let mut old = 0;
+    VirtualProtect(stub_ptr as _, 0x20, PAGE_EXECUTE_READ, &mut old);
+
+    // Fire the syscall
+    let syscall: unsafe extern "system" fn(
+        *mut HANDLE, u32, *mut u8, HANDLE, *mut u8, *mut u8,
+        u32, usize, usize, usize, *mut u8
+    ) -> NTSTATUS = std::mem::transmute(stub_ptr);
 
     let mut thread: HANDLE = null_mut();
     let status = syscall(
@@ -74,10 +103,16 @@ pub unsafe fn spawn_ab_thread() -> Result<(), u32> {
         0, 0, 0,
         null_mut(),
     );
+
+    // Immediately wipe the stub after syscall
+    VirtualProtect(stub_ptr as _, 0x20, PAGE_EXECUTE_READWRITE, &mut old);
+    std::ptr::write_bytes(stub_ptr, 0x00, 0x20);
+    VirtualFree(stub_ptr as _, 0, MEM_RELEASE);
+
     if status != 0 {
         return Err(AB_THREAD_CREATE_FAIL);
     }
-    
+
     CloseHandle(thread);
 
     Ok(())
