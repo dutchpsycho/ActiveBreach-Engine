@@ -111,8 +111,9 @@ pub unsafe fn ab_call(name: &str, args: &[usize]) -> usize {
         return AB_DISPATCH_ARG_TOO_MANY as usize;
     }
 
-    if !internal::dispatch::G_READY.load(std::sync::atomic::Ordering::Acquire) {
-        return AB_DISPATCH_NOT_READY as usize;
+    // Wait until dispatcher thread signals readiness
+    while !internal::dispatch::G_READY.load(std::sync::atomic::Ordering::Acquire) {
+        std::thread::yield_now();
     }
 
     let tbl = match internal::exports::SYSCALL_TABLE.get() {
@@ -128,12 +129,9 @@ pub unsafe fn ab_call(name: &str, args: &[usize]) -> usize {
     let op = internal::dispatch::G_OPFRAME.as_mut_ptr();
     let frame = &mut *op;
 
-    let mut spin = 0;
+    // Wait until the frame is free (status == 0)
     while frame.status.load(std::sync::atomic::Ordering::Acquire) != 0 {
-        spin += 1;
-        if spin > 100_000 {
-            return AB_DISPATCH_FRAME_TIMEOUT as usize;
-        }
+        std::thread::yield_now();
     }
 
     frame.syscall_id = ssn;
@@ -141,16 +139,13 @@ pub unsafe fn ab_call(name: &str, args: &[usize]) -> usize {
     frame.args[..args.len()].copy_from_slice(args);
     frame.status.store(1, std::sync::atomic::Ordering::Release);
 
-    let mut spin = 0;
+    // Wait for dispatcher to process the syscall (status == 2)
     while frame.status.load(std::sync::atomic::Ordering::Acquire) != 2 {
-        spin += 1;
-        if spin > 100_000 {
-            return AB_DISPATCH_FRAME_TIMEOUT as usize;
-        }
+        std::thread::yield_now();
     }
 
     let ret = frame.ret;
     frame.status.store(0, std::sync::atomic::Ordering::Release);
-    
+
     ret
 }
