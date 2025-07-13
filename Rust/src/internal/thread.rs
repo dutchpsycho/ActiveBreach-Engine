@@ -46,20 +46,19 @@ const OFFSET_TEB_START_ADDR: usize = 0x1720;
 pub unsafe fn spawn_ab_thread() -> Result<(), u32> {
     let mut mapped_size = 0;
     let (mapped_base, _) = mapper::buffer(&mut mapped_size)
-        .ok_or(AB_THREAD_FILEMAP_FAIL)?;
+        .ok_or_else(|| ab_err_code(ABError::ThreadFilemapFail))?;
 
     if exports::extract_syscalls(mapped_base, mapped_size).is_err() {
-        return Err(AB_THREAD_SYSCALL_INIT_FAIL);
+        return Err(ab_err_code(ABError::ThreadSyscallInitFail));
     }
 
     let table = exports::get_syscall_table()
-        .ok_or(AB_THREAD_SYSCALL_TABLE_MISS)?;
+        .ok_or_else(|| ab_err_code(ABError::ThreadSyscallTableMiss))?;
 
     let ssn = *table
         .get("NtCreateThreadEx")
-        .ok_or(AB_THREAD_NTCREATE_MISSING)?;
+        .ok_or_else(|| ab_err_code(ABError::ThreadNtCreateMissing))?;
 
-    // Manually track the stub pointer so we can wipe it later
     let stub_ptr = VirtualAlloc(
         null_mut(), 0x20,
         MEM_COMMIT | MEM_RESERVE,
@@ -67,29 +66,28 @@ pub unsafe fn spawn_ab_thread() -> Result<(), u32> {
     ) as *mut u8;
 
     if stub_ptr.is_null() {
-        return Err(AB_THREAD_STUB_ALLOC_FAIL);
+        return Err(ab_err_code(ABError::ThreadStubAllocFail));
     }
 
     let tmpl: [u8; 11] = [
-        0x4C, 0x8B, 0xD1,
-        0xB8,
+        0x4C, 0x8B, 0xD1,       // mov r10, rcx
+        0xB8,                   // mov eax, SSN
         (ssn & 0xFF) as u8,
         ((ssn >> 8) & 0xFF) as u8,
         ((ssn >> 16) & 0xFF) as u8,
         ((ssn >> 24) & 0xFF) as u8,
-        0x0F, 0x05,
-        0xC3,
+        0x0F, 0x05,             // syscall
+        0xC3,                   // ret
     ];
     std::ptr::copy_nonoverlapping(tmpl.as_ptr(), stub_ptr, tmpl.len());
 
     let mut old = 0;
     VirtualProtect(stub_ptr as _, 0x20, PAGE_EXECUTE_READ, &mut old);
 
-    // Fire the syscall
     let syscall: unsafe extern "system" fn(
         *mut HANDLE, u32, *mut u8, HANDLE, *mut u8, *mut u8,
         u32, usize, usize, usize, *mut u8
-    ) -> NTSTATUS = std::mem::transmute(stub_ptr);
+    ) -> i32 = std::mem::transmute(stub_ptr);
 
     let mut thread: HANDLE = null_mut();
     let status = syscall(
@@ -104,13 +102,12 @@ pub unsafe fn spawn_ab_thread() -> Result<(), u32> {
         null_mut(),
     );
 
-    // Immediately wipe the stub after syscall
     VirtualProtect(stub_ptr as _, 0x20, PAGE_EXECUTE_READWRITE, &mut old);
     std::ptr::write_bytes(stub_ptr, 0x00, 0x20);
     VirtualFree(stub_ptr as _, 0, MEM_RELEASE);
 
     if status != 0 {
-        return Err(AB_THREAD_CREATE_FAIL);
+        return Err(ab_err_code(ABError::ThreadCreateFail));
     }
 
     CloseHandle(thread);
@@ -192,7 +189,7 @@ pub unsafe fn nuke_teb_soft() -> Result<(), u32> {
     let stack_base = *(teb.add(OFFSET_TEB_STACK_BASE) as *const usize);
     let stack_limit = *(teb.add(OFFSET_TEB_STACK_LIMIT) as *const usize);
     if rsp < stack_limit || rsp > stack_base {
-        return Err(AB_THREAD_TEBCORRUPT_SKIP);
+        return Err(ab_err_code(ABError::ThreadTEBCorruptSkip));
     }
 
     (teb.add(OFFSET_TEB_LAST_ERROR) as *mut u32).write_volatile(0);

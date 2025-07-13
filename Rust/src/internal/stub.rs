@@ -12,7 +12,7 @@ use winapi::um::winnt::{
 use crate::internal::crypto::lea::{lea_encrypt_block, lea_decrypt_block};
 use crate::internal::diagnostics::*;
 
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 
 /// Size of a syscall stub in bytes.
 pub const STUB_SIZE: usize = 32;
@@ -50,10 +50,7 @@ pub struct AbRingAllocator {
 unsafe impl Send for AbRingAllocator {}
 unsafe impl Sync for AbRingAllocator {}
 
-lazy_static! {
-    /// Global stub allocator used by the dispatcher thread.
-    pub static ref G_STUB_POOL: AbRingAllocator = AbRingAllocator::init();
-}
+pub static G_STUB_POOL: Lazy<AbRingAllocator> = Lazy::new(AbRingAllocator::init);
 
 impl AbRingAllocator {
     /// Initializes the stub ring, preallocating and encrypting each RWX stub.
@@ -99,7 +96,7 @@ impl AbRingAllocator {
         } as usize;
     
         if raw == 0 {
-            return Err(AB_STUB_ALLOC_FAIL);
+            return Err(ab_err_code(ABError::StubAllocFail));
         }
     
         let aligned = (raw + 15) & !15;
