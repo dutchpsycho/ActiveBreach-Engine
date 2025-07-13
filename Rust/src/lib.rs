@@ -46,6 +46,9 @@
 pub mod internal;
 
 use crate::internal::diagnostics::*;
+use crate::internal::dispatch::{G_READY, G_OPFRAME};
+use crate::internal::exports::SYSCALL_TABLE;
+use crate::internal::diagnostics::{ab_err_code, ABError};
 
 /// Launches the ActiveBreach syscall dispatcher thread and loads the syscall table.
 ///
@@ -105,33 +108,37 @@ pub unsafe fn activebreach_launch() -> Result<(), u32> {
 /// ```
 pub unsafe fn ab_call(name: &str, args: &[usize]) -> usize {
     if name.len() >= 64 {
-        return AB_DISPATCH_NAME_TOO_LONG as usize;
+        return ab_err_code(ABError::DispatchNameTooLong) as usize;
     }
     if args.len() > 16 {
-        return AB_DISPATCH_ARG_TOO_MANY as usize;
+        return ab_err_code(ABError::DispatchArgTooMany) as usize;
     }
 
-    // Wait until dispatcher thread signals readiness
-    while !internal::dispatch::G_READY.load(std::sync::atomic::Ordering::Acquire) {
+    // Wait for the dispatcher thread to initialize
+    while !G_READY.load(std::sync::atomic::Ordering::Acquire) {
         std::thread::yield_now();
     }
 
-    let tbl = match internal::exports::SYSCALL_TABLE.get() {
+    let tbl = match SYSCALL_TABLE.get() {
         Some(t) => t,
-        None => return AB_DISPATCH_TABLE_MISSING as usize,
+        None => return ab_err_code(ABError::DispatchTableMissing) as usize,
     };
 
     let ssn = match tbl.get(name) {
         Some(n) => *n,
-        None => return AB_DISPATCH_SYSCALL_MISSING as usize,
+        None => return ab_err_code(ABError::DispatchSyscallMissing) as usize,
     };
 
-    let op = internal::dispatch::G_OPFRAME.as_mut_ptr();
+    let op = G_OPFRAME.as_mut_ptr();
     let frame = &mut *op;
 
-    // Wait until the frame is free (status == 0)
+    let mut spin = 0;
     while frame.status.load(std::sync::atomic::Ordering::Acquire) != 0 {
-        std::thread::yield_now();
+        if spin >= 0x200_0000 {
+            return ab_err_code(ABError::DispatchFrameTimeout) as usize;
+        }
+        std::hint::spin_loop();
+        spin += 1;
     }
 
     frame.syscall_id = ssn;
@@ -139,9 +146,13 @@ pub unsafe fn ab_call(name: &str, args: &[usize]) -> usize {
     frame.args[..args.len()].copy_from_slice(args);
     frame.status.store(1, std::sync::atomic::Ordering::Release);
 
-    // Wait for dispatcher to process the syscall (status == 2)
+    let mut spin2 = 0;
     while frame.status.load(std::sync::atomic::Ordering::Acquire) != 2 {
-        std::thread::yield_now();
+        if spin2 >= 0x200_0000 {
+            return ab_err_code(ABError::DispatchFrameTimeout) as usize;
+        }
+        std::hint::spin_loop();
+        spin2 += 1;
     }
 
     let ret = frame.ret;

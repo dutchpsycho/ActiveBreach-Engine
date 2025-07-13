@@ -1,9 +1,9 @@
 [package]
-name = "ab_harness"
+name = "activebreach-harness"
 version = "0.1.0"
 edition = "2021"
 license = "CC-BY-NC-4.0"
-description = "Test harness for ActiveBreach syscall proxy engine"
+description = "Test harness for ActiveBreach-Engine"
 
 [dependencies]
 activebreach = { path = "../" }

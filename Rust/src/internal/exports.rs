@@ -95,28 +95,28 @@ unsafe fn rva_to_ptr_or_fault(
 pub unsafe fn extract_syscalls(ntdll: *const u8, size: usize) -> Result<(), u32> {
     if ntdll.is_null() {
         printdev!("ntdll ptr is null");
-        return Err(AB_NOT_INIT);
+        return Err(ab_err_code(ABError::NotInit));
     }
     if size == 0 {
         printdev!("image size is zero");
-        return Err(AB_NULL);
+        return Err(ab_err_code(ABError::Null));
     }
     if SYSCALL_TABLE.get().is_some() {
         printdev!("syscall table already initialized");
-        return Err(AB_ALREADY_INIT);
+        return Err(ab_err_code(ABError::AlreadyInit));
     }
 
     let dos = &*(ntdll as *const IMAGE_DOS_HEADER);
     if dos.e_magic != 0x5A4D {
         printdev!("invalid DOS header");
-        return Err(AB_INVALID_IMAGE);
+        return Err(ab_err_code(ABError::InvalidImage));
     }
 
     let nt_offset = dos.e_lfanew as usize;
     let nt = &*(ntdll.add(nt_offset) as *const IMAGE_NT_HEADERS);
-    if nt.Signature != 0x0000_4550 {
+    if nt.Signature != 0x00004550 {
         printdev!("invalid NT signature");
-        return Err(AB_INVALID_IMAGE);
+        return Err(ab_err_code(ABError::InvalidImage));
     }
 
     let num_secs = nt.FileHeader.NumberOfSections as usize;
@@ -126,63 +126,72 @@ pub unsafe fn extract_syscalls(ntdll: *const u8, size: usize) -> Result<(), u32>
     let sections = slice::from_raw_parts(secs_ptr, num_secs);
 
     let export_va = nt.OptionalHeader.DataDirectory[0].VirtualAddress as usize;
-    let export_ptr = rva_to_ptr_or_fault(ntdll, export_va, size, sections, AB_EXPORT_FAIL)?
-        as *const IMAGE_EXPORT_DIRECTORY;
+    let export_ptr = rva_to_ptr_or_fault(
+        ntdll, export_va, size, sections, ab_err_code(ABError::ExportFail)
+    )? as *const IMAGE_EXPORT_DIRECTORY;
     let export = &*export_ptr;
 
     let name_count = export.NumberOfNames as usize;
     let func_count = export.NumberOfFunctions as usize;
 
-    let names = rva_to_ptr_or_fault(ntdll, export.AddressOfNames as usize, size, sections, AB_EXPORT_FAIL + 1)?
-        as *const u32;
-    let ords = rva_to_ptr_or_fault(ntdll, export.AddressOfNameOrdinals as usize, size, sections, AB_EXPORT_FAIL + 2)?
-        as *const u16;
-    let funcs = rva_to_ptr_or_fault(ntdll, export.AddressOfFunctions as usize, size, sections, AB_EXPORT_FAIL + 3)?
-        as *const u32;
+    let names = rva_to_ptr_or_fault(
+        ntdll, export.AddressOfNames as usize, size, sections, ab_err_code(ABError::ExportFail)
+    )? as *const u32;
+
+    let ords = rva_to_ptr_or_fault(
+        ntdll, export.AddressOfNameOrdinals as usize, size, sections, ab_err_code(ABError::ExportFail)
+    )? as *const u16;
+
+    let funcs = rva_to_ptr_or_fault(
+        ntdll, export.AddressOfFunctions as usize, size, sections, ab_err_code(ABError::ExportFail)
+    )? as *const u32;
 
     let mut map = FxHashMap::with_capacity_and_hasher(name_count, Default::default());
+
     for i in 0..name_count {
         let name_rva = std::ptr::read_unaligned(names.add(i)) as usize;
-        let name_ptr = rva_to_ptr_or_fault(ntdll, name_rva, size, sections, AB_BAD_SYSCALL)?
-            as *const c_char;
-        let name_bytes = CStr::from_ptr(name_ptr).to_bytes();
-        if name_bytes.len() < 3 || &name_bytes[..2] != b"Nt" {
+        let name_ptr = rva_to_ptr_or_fault(
+            ntdll, name_rva, size, sections, ab_err_code(ABError::BadSyscall)
+        )? as *const c_char;
+
+        let name = CStr::from_ptr(name_ptr).to_bytes();
+        if name.len() < 3 || &name[..2] != b"Nt" {
             continue;
         }
 
         let ord = std::ptr::read_unaligned(ords.add(i)) as usize;
         if ord >= func_count {
-            printdev!("ordinal {} out of bounds", ord);
-            return Err(AB_BAD_SYSCALL + 1);
+            return Err(ab_err_code(ABError::BadSyscall));
         }
 
         let func_rva = std::ptr::read_unaligned(funcs.add(ord)) as usize;
-        let sig_ptr = rva_to_ptr_or_fault(ntdll, func_rva, size, sections, AB_BAD_SYSCALL + 2)?;
-        let sig = slice::from_raw_parts(sig_ptr, 8);
+        let sig_ptr = rva_to_ptr_or_fault(
+            ntdll, func_rva, size, sections, ab_err_code(ABError::BadSyscall)
+        )?;
 
+        let sig = slice::from_raw_parts(sig_ptr, 8);
         let valid = matches!(
             sig,
             [0x4C, 0x8B, 0xD1, 0xB8, ..] |
             [0xB8, ..] |
             [0x4D, 0x8B, 0xD1, 0xB8, ..]
         );
+
         if !valid {
             continue;
         }
 
         let ssn = u32::from_le_bytes([sig[4], sig[5], sig[6], sig[7]]);
-        let key = String::from_utf8_unchecked(name_bytes.to_vec());
+        let key = String::from_utf8_unchecked(name.to_vec());
         map.insert(key, ssn);
     }
 
     if SYSCALL_TABLE.set(map).is_err() {
-        printdev!("syscall table already set again?");
-        return Err(AB_ALREADY_INIT);
+        return Err(ab_err_code(ABError::AlreadyInit));
     }
 
     drop_ntdll();
-
-    Ok(())  
+    Ok(())
 }
 
 /// Returns a reference to the global syscall table, if initialized.
