@@ -96,7 +96,7 @@ impl AbRingAllocator {
         } as usize;
     
         if raw == 0 {
-            return Err(ab_err_code(ABError::StubAllocFail));
+            return Err(ABErr(ABError::StubAllocFail));
         }
     
         let aligned = (raw + 15) & !15;

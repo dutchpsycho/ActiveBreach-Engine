@@ -46,9 +46,8 @@
 pub mod internal;
 
 use crate::internal::diagnostics::*;
-use crate::internal::dispatch::{G_READY, G_OPFRAME};
+use crate::internal::dispatch::{__ActiveBreachFire, G_READY, G_OPFRAME};
 use crate::internal::exports::SYSCALL_TABLE;
-use crate::internal::diagnostics::{ab_err_code, ABError};
 
 /// Launches the ActiveBreach syscall dispatcher thread and loads the syscall table.
 ///
@@ -73,7 +72,7 @@ use crate::internal::diagnostics::{ab_err_code, ABError};
 /// }
 /// ```
 pub unsafe fn activebreach_launch() -> Result<(), u32> {
-    internal::thread::spawn_ab_thread()
+    internal::thread::_SpawnActiveBreachThread()
 }
 
 /// Issues a native system call via ActiveBreach by syscall name and arguments.
@@ -108,55 +107,16 @@ pub unsafe fn activebreach_launch() -> Result<(), u32> {
 /// ```
 pub unsafe fn ab_call(name: &str, args: &[usize]) -> usize {
     if name.len() >= 64 {
-        return ab_err_code(ABError::DispatchNameTooLong) as usize;
-    }
-    if args.len() > 16 {
-        return ab_err_code(ABError::DispatchArgTooMany) as usize;
+        return ABErr(ABError::DispatchNameTooLong) as usize;
     }
 
-    // Wait for the dispatcher thread to initialize
+    if args.len() > 16 {
+        return ABErr(ABError::DispatchArgTooMany) as usize;
+    }
+
     while !G_READY.load(std::sync::atomic::Ordering::Acquire) {
         std::thread::yield_now();
     }
 
-    let tbl = match SYSCALL_TABLE.get() {
-        Some(t) => t,
-        None => return ab_err_code(ABError::DispatchTableMissing) as usize,
-    };
-
-    let ssn = match tbl.get(name) {
-        Some(n) => *n,
-        None => return ab_err_code(ABError::DispatchSyscallMissing) as usize,
-    };
-
-    let op = G_OPFRAME.as_mut_ptr();
-    let frame = &mut *op;
-
-    let mut spin = 0;
-    while frame.status.load(std::sync::atomic::Ordering::Acquire) != 0 {
-        if spin >= 0x200_0000 {
-            return ab_err_code(ABError::DispatchFrameTimeout) as usize;
-        }
-        std::hint::spin_loop();
-        spin += 1;
-    }
-
-    frame.syscall_id = ssn;
-    frame.arg_count = args.len();
-    frame.args[..args.len()].copy_from_slice(args);
-    frame.status.store(1, std::sync::atomic::Ordering::Release);
-
-    let mut spin2 = 0;
-    while frame.status.load(std::sync::atomic::Ordering::Acquire) != 2 {
-        if spin2 >= 0x200_0000 {
-            return ab_err_code(ABError::DispatchFrameTimeout) as usize;
-        }
-        std::hint::spin_loop();
-        spin2 += 1;
-    }
-
-    let ret = frame.ret;
-    frame.status.store(0, std::sync::atomic::Ordering::Release);
-
-    ret
+    __ActiveBreachFire(name, args)
 }

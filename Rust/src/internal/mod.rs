@@ -6,3 +6,4 @@ pub mod stub;
 pub mod dispatch;
 pub mod thread;
 pub mod diagnostics;
+pub mod sidewinder;

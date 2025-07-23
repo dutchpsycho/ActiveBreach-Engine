@@ -23,7 +23,10 @@ use std::sync::atomic::{AtomicU32, Ordering, AtomicBool};
 use winapi::um::memoryapi::VirtualProtect;
 use winapi::um::winnt::{PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_READ};
 
+use crate::internal::diagnostics::{ABError, ABErr};
 use crate::internal::stub::{G_STUB_POOL, STUB_SIZE};
+use crate::internal::exports::SYSCALL_TABLE;
+use crate::internal::sidewinder::{Sidewinder, SidewinderInit};
 use crate::printdev;
 
 /// Operation frame shared between the caller and dispatcher thread.
@@ -85,6 +88,8 @@ pub unsafe extern "system" fn thread_proc(_: *mut winapi::ctypes::c_void) -> u32
     G_READY.store(true, Ordering::Release);
     printdev!("opframe initialized, ready flag set");
 
+    SidewinderInit();
+
     let frame = &mut *G_OPFRAME.as_mut_ptr();
     let mut spin = 0;
 
@@ -127,4 +132,88 @@ pub unsafe extern "system" fn thread_proc(_: *mut winapi::ctypes::c_void) -> u32
 
         G_STUB_POOL.release(stub);
     }
+}
+
+#[inline(always)]
+pub unsafe fn __ActiveBreachFire(name: &str, args: &[usize]) -> usize {
+    let tbl = match SYSCALL_TABLE.get() {
+        Some(t) => t,
+        None => return ABErr(ABError::DispatchTableMissing) as usize,
+    };
+
+    let ssn = match tbl.get(name) {
+        Some(n) => *n,
+        None => return ABErr(ABError::DispatchSyscallMissing) as usize,
+    };
+
+    let stub = match G_STUB_POOL.acquire() {
+        Some(p) if !p.is_null() => p,
+        _ => return ABErr(ABError::DispatchStubAllocFail) as usize,
+    };
+
+    if stub as usize & 15 != 0 {
+        G_STUB_POOL.release(stub);
+        return ABErr(ABError::DispatchStubMisaligned) as usize;
+    }
+
+    // Patch the stub with the syscall SSN
+    let ssn_ptr = stub.add(4) as *mut u32;
+    let mut old = 0;
+    if VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old) == 0 {
+        G_STUB_POOL.release(stub);
+        return ABErr(ABError::DispatchProtectFail) as usize;
+    }
+    ssn_ptr.write_volatile(ssn);
+    VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READ, &mut old);
+
+    let op = G_OPFRAME.as_mut_ptr();
+    let frame = &mut *op;
+
+    let mut spin = 0;
+    while frame.status.load(std::sync::atomic::Ordering::Acquire) != 0 {
+        if spin >= 0x200_0000 {
+            G_STUB_POOL.release(stub);
+            return ABErr(ABError::DispatchFrameTimeout) as usize;
+        }
+        std::hint::spin_loop();
+        spin += 1;
+    }
+
+    frame.syscall_id = ssn;
+    frame.arg_count = args.len();
+    frame.args[..args.len()].copy_from_slice(args);
+
+    let mut orig_rsp: usize = 0;
+    let mut spoofed = false;
+
+    if let Some(fake_rsp) = Sidewinder(name, stub) {
+        core::arch::asm!("mov {}, rsp", out(reg) orig_rsp);
+        core::arch::asm!("mov rsp, {}", in(reg) fake_rsp);
+        spoofed = true;
+    }
+
+    frame.status.store(1, std::sync::atomic::Ordering::Release);
+
+    let mut spin2 = 0;
+    while frame.status.load(std::sync::atomic::Ordering::Acquire) != 2 {
+        if spin2 >= 0x200_0000 {
+            if spoofed {
+                core::arch::asm!("mov rsp, {}", in(reg) orig_rsp);
+            }
+            G_STUB_POOL.release(stub);
+            return ABErr(ABError::DispatchFrameTimeout) as usize;
+        }
+        std::hint::spin_loop();
+        spin2 += 1;
+    }
+
+    if spoofed {
+        core::arch::asm!("mov rsp, {}", in(reg) orig_rsp);
+    }
+
+    let ret = frame.ret;
+    frame.status.store(0, std::sync::atomic::Ordering::Release);
+
+    G_STUB_POOL.release(stub);
+    ret
 }
