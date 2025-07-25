@@ -1,16 +1,10 @@
 ﻿/*
  * ==================================================================================
- *  Repository:   Syscall Proxy
+ *  Repository:   ActiveBreach-Engine
  *  Project:      ActiveBreach
  *  File:         ActiveBreach.cpp
  *  Author:       DutchPsycho
  *  Organization: TITAN Softwork Solutions
- *  Inspired by:  MDSEC Research
- *
- *  Description:
- *      ActiveBreach is a syscall abstraction layer that dynamically proxies syscalls
- *      by extracting system service numbers (SSNs) from ntdll.dll and constructing hashed
- *      syscall stubs for indirect execution.
  *
  *  License:      Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
  *  Copyright:    (C) 2025 TITAN Softwork Solutions. All rights reserved.
@@ -45,10 +39,7 @@
 #include <immintrin.h>
 #include <intrin.h>
 
-using NtCreateThreadEx_t = NTSTATUS(NTAPI*)(
-    PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, HANDLE,
-    PVOID, PVOID, ULONG, SIZE_T, SIZE_T, SIZE_T, PPS_ATTRIBUTE_LIST
-    );
+using NtCreateThreadEx_t = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, _AB_OBJECT_ATTRIBUTES, HANDLE, PVOID, PVOID, ULONG, SIZE_T, SIZE_T, SIZE_T, _AB_PS_ATTRIBUTE_LIST);
 
 /**
  * @brief Performs runtime integrity checks to detect potential tampering, debugging, or external influence.
@@ -72,20 +63,23 @@ namespace AntiBreach {
     static std::atomic<bool>      g_text_initialized{ false };
     static std::atomic<uint32_t>  g_violation_counter{ 0 };
 
-    [[nodiscard]] __forceinline PPEB GetPEB() noexcept {return reinterpret_cast<PPEB>(__readgsqword(0x60));}
-    [[nodiscard]] __forceinline PTEB GetTEB() noexcept {return reinterpret_cast<PTEB>(__readgsqword(0x30));}
+    [[nodiscard]] __forceinline PAB_PEB GetPEB() noexcept {
+        return reinterpret_cast<PAB_PEB>(__readgsqword(0x60));
+    }
 
-    [[nodiscard]] inline bool ChkTEB() noexcept
-    {
+    [[nodiscard]] __forceinline PAB_TEB GetTEB() noexcept {
+        return reinterpret_cast<PAB_TEB>(__readgsqword(0x30));
+    }
+
+    [[nodiscard]] inline bool ChkTEB() noexcept {
         const auto teb = GetTEB();
         bool ok =
-            (DWORD)(ULONG_PTR)teb->ClientId.UniqueProcess == __readgsdword(0x40) &&
-            (DWORD)(ULONG_PTR)teb->ClientId.UniqueThread == __readgsdword(0x48);
+            static_cast<DWORD>(reinterpret_cast<uintptr_t>(teb->ClientId.UniqueProcess)) == __readgsdword(0x40) &&
+            static_cast<DWORD>(reinterpret_cast<uintptr_t>(teb->ClientId.UniqueThread)) == __readgsdword(0x48);
 
 #ifdef AB_DEBUG
         if (!ok) std::puts("[AntiBreach] TEB mismatch");
 #endif
-
         return ok;
     }
 
@@ -504,7 +498,7 @@ namespace ActiveBreachDebugger {
 
     static const char* ntstatus_to_str(NTSTATUS code) {
         switch (code) {
-        case 0x00000000: return "STATUS_SUCCESS";
+        case 0x00000000: return "AB_SUCCESS";
         case 0x00000103: return "STATUS_PENDING";
         case 0x00000104: return "STATUS_REPARSE";
         case 0x80000001: return "STATUS_GUARD_PAGE_VIOLATION";
@@ -813,6 +807,7 @@ namespace ActiveBreach {
             if (!GetEnvironmentVariableW(wide_env, sysdir, MAX_PATH)) return nullptr;
             mbstowcs_s(&conv, wide_dll, enc_dll.c_str(), MAX_PATH);
             mbstowcs_s(&conv, wide_sys, enc_sys.c_str(), MAX_PATH);
+
             if (swprintf(path, MAX_PATH, L"%s\\%s\\%s", sysdir, wide_sys, wide_dll) < 0)
                 return nullptr;
 
@@ -958,7 +953,7 @@ namespace ActiveBreach {
     namespace Callback {
         inline void Callback(const Types::_SyscallState& state) {
             uint64_t elapsed = __rdtsc() - state.start_time;
-            if (elapsed > SYSCALL_TIME_THRESHOLD) {
+            if (elapsed > ACTIVEBREACH_SYSCALL_TIME_THRESHOLD) {
                 RaiseException(ACTIVEBREACH_SYSCALL_LONGSYSCALL, 0, 0, nullptr);
             }
         }
@@ -1227,15 +1222,15 @@ extern "C" void ActiveBreach_launch() {
     }
 }
 
-extern "C" void* _ab_get_stub(const char* name) {
+extern "C" void* _AbGetStub(const char* name) {
     using namespace ActiveBreach;
     return (name && *name) ? Stubs::g_pool.LookupStub(name) : nullptr;
 }
 
-extern "C" uint32_t ab_violation_count() {
+extern "C" uint32_t _AbViolationCount() {
     return AntiBreach::GetViolationCount();
 }
 
-extern "C" void* ab_create_ephemeral_stub(uint32_t ssn, DWORD prot) {
+extern "C" void* _AbCreateEphemeralStub(uint32_t ssn, DWORD prot) {
     return ActiveBreach::Stubs::CreateEphemeralStub(ssn, prot);
 }
