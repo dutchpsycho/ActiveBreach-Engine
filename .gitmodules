@@ -4,3 +4,6 @@
 [submodule "SysQuanta"]
 	path = SysQuanta
 	url = https://github.com/dutchpsycho/SysQuanta
+[submodule "Konflict"]
+	path = Konflict
+	url = https://github.com/TITAN-Softwork-Solutions/Konflict
