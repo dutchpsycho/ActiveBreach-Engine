@@ -49,6 +49,10 @@ use crate::internal::diagnostics::*;
 use crate::internal::dispatch::{__ActiveBreachFire, G_READY, G_OPFRAME};
 use crate::internal::exports::SYSCALL_TABLE;
 
+use winapi::um::synchapi::{WaitOnAddress, WakeByAddressSingle};
+use winapi::shared::minwindef::BOOL;
+use std::ptr;
+
 /// Launches the ActiveBreach syscall dispatcher thread and loads the syscall table.
 ///
 /// This function performs the following:
@@ -115,7 +119,15 @@ pub unsafe fn ab_call(name: &str, args: &[usize]) -> usize {
     }
 
     while !G_READY.load(std::sync::atomic::Ordering::Acquire) {
-        std::thread::yield_now();
+        let zero: u8 = 0;
+        unsafe {
+            WaitOnAddress(
+                &G_READY as *const _ as *mut winapi::ctypes::c_void,
+                &zero as *const _ as *mut winapi::ctypes::c_void,
+                std::mem::size_of::<u8>(),
+                u32::MAX,
+            );
+        }
     }
 
     __ActiveBreachFire(name, args)

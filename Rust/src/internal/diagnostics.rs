@@ -40,6 +40,7 @@ pub enum ABError {
     DispatchStubAllocFail,
     DispatchStubMisaligned,
     DispatchProtectFail,
+    VEHInitFail,
 }
 
 #[cfg(debug_assertions)]
@@ -69,7 +70,7 @@ pub static ERROR_CODES: Lazy<Mutex<HashMap<ABError, u32>>> = Lazy::new(|| {
         ABError::DispatchNotReady, ABError::DispatchTableMissing,
         ABError::DispatchSyscallMissing, ABError::DispatchFrameTimeout,
         ABError::DispatchStubAllocFail, ABError::DispatchStubMisaligned,
-        ABError::DispatchProtectFail,
+        ABError::DispatchProtectFail, ABError::VEHInitFail,
     ] {
         let key = format!("{:?}", err);
         let code = hash_err(&key);
@@ -92,13 +93,32 @@ pub fn ABErr(kind: ABError) -> u32 {
 }
 
 #[macro_export]
-macro_rules! printdev {
+macro_rules! AbOut {
     ($($arg:tt)*) => {
         #[cfg(debug_assertions)]
         {
+            use std::ffi::CString;
+            use winapi::um::debugapi::OutputDebugStringA;
+            use winapi::um::processthreadsapi::GetCurrentThreadId;
+
             let module_path = module_path!();
             let tag = module_path.split("::").last().unwrap_or("UNKNOWN");
-            println!("[AB:{}] {}", tag.to_uppercase(), format!($($arg)*));
+            let tid = unsafe { GetCurrentThreadId() };
+
+            let msg = format!(
+                "[AB:{}][TID:{}] {}",
+                tag.to_uppercase(),
+                tid,
+                format!($($arg)*)
+            );
+            
+            println!("{}", msg);
+            
+            unsafe {
+                if let Ok(cmsg) = CString::new(msg) {
+                    OutputDebugStringA(cmsg.as_ptr());
+                }
+            }
         }
     };
 }

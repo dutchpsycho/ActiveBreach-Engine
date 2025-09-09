@@ -26,8 +26,8 @@ use winapi::um::winnt::{PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_READ};
 use crate::internal::diagnostics::{ABError, ABErr};
 use crate::internal::stub::{G_STUB_POOL, STUB_SIZE};
 use crate::internal::exports::SYSCALL_TABLE;
-use crate::internal::sidewinder::{Sidewinder, SidewinderInit};
-use crate::printdev;
+use crate::internal::stack::{AbStackWinder, SidewinderInit};
+use crate::AbOut;
 
 /// Operation frame shared between the caller and dispatcher thread.
 ///
@@ -84,9 +84,10 @@ pub static        G_READY:  AtomicBool          = AtomicBool::new(false);
 /// It assumes `G_OPFRAME` is uninitialized and will remain in memory.
 ///
 pub unsafe extern "system" fn thread_proc(_: *mut winapi::ctypes::c_void) -> u32 {
+
     G_OPFRAME.write(ABOpFrame::default());
     G_READY.store(true, Ordering::Release);
-    printdev!("opframe initialized, ready flag set");
+    AbOut!("opframe initialized, ready flag set");
 
     SidewinderInit();
 
@@ -97,8 +98,8 @@ pub unsafe extern "system" fn thread_proc(_: *mut winapi::ctypes::c_void) -> u32
         while frame.status.load(Ordering::Acquire) != 1 {
             spin += 1;
             match spin {
-                0..=64   => cpu_pause(),                // fast wait
-                65..=256 => std::thread::yield_now(),   // let scheduler breathe
+                0..=64   => cpu_pause(),
+                65..=256 => std::thread::yield_now(),
                 _        => std::thread::sleep(std::time::Duration::from_micros(50)),
             }
         }
@@ -106,14 +107,14 @@ pub unsafe extern "system" fn thread_proc(_: *mut winapi::ctypes::c_void) -> u32
 
         let stub = match G_STUB_POOL.acquire() {
             Some(p) if !p.is_null() => p,
-            _ => { printdev!("stub pool empty"); continue; }
+            _ => { AbOut!("stub pool empty"); continue; }
         };
-        if stub as usize & 15 != 0 { printdev!("stub misaligned"); G_STUB_POOL.release(stub); continue; }
+        if stub as usize & 15 != 0 { AbOut!("stub misaligned"); G_STUB_POOL.release(stub); continue; }
 
         let ssn_ptr = stub.add(4) as *mut u32;
         let mut old = 0;
         if VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old) == 0 {
-            printdev!("RWX fail"); G_STUB_POOL.release(stub); continue;
+            AbOut!("RWX fail"); G_STUB_POOL.release(stub); continue;
         }
         ssn_ptr.write_volatile(frame.syscall_id);
         VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READ, &mut old);
@@ -136,6 +137,7 @@ pub unsafe extern "system" fn thread_proc(_: *mut winapi::ctypes::c_void) -> u32
 
 #[inline(always)]
 pub unsafe fn __ActiveBreachFire(name: &str, args: &[usize]) -> usize {
+
     let tbl = match SYSCALL_TABLE.get() {
         Some(t) => t,
         None => return ABErr(ABError::DispatchTableMissing) as usize,
@@ -156,14 +158,16 @@ pub unsafe fn __ActiveBreachFire(name: &str, args: &[usize]) -> usize {
         return ABErr(ABError::DispatchStubMisaligned) as usize;
     }
 
-    // Patch the stub with the syscall SSN
     let ssn_ptr = stub.add(4) as *mut u32;
     let mut old = 0;
+    
     if VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old) == 0 {
         G_STUB_POOL.release(stub);
         return ABErr(ABError::DispatchProtectFail) as usize;
     }
+    
     ssn_ptr.write_volatile(ssn);
+    
     VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READ, &mut old);
 
     let op = G_OPFRAME.as_mut_ptr();
@@ -186,7 +190,7 @@ pub unsafe fn __ActiveBreachFire(name: &str, args: &[usize]) -> usize {
     let mut orig_rsp: usize = 0;
     let mut spoofed = false;
 
-    if let Some(fake_rsp) = Sidewinder(name, stub) {
+    if let Some(fake_rsp) = AbStackWinder(name, stub) {
         core::arch::asm!("mov {}, rsp", out(reg) orig_rsp);
         core::arch::asm!("mov rsp, {}", in(reg) fake_rsp);
         spoofed = true;
@@ -215,5 +219,6 @@ pub unsafe fn __ActiveBreachFire(name: &str, args: &[usize]) -> usize {
     frame.status.store(0, std::sync::atomic::Ordering::Release);
 
     G_STUB_POOL.release(stub);
+
     ret
 }
