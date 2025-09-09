@@ -28,11 +28,9 @@ extern "system" {
     ) -> i32;
 }
 
-// ---- restore the globals your code uses ----
 static MAPPED_NTDLL_PTR: AtomicPtr<u8> = AtomicPtr::new(null_mut());
 static MAPPED_NTDLL_SIZE: AtomicUsize = AtomicUsize::new(0);
 
-// ---- minimal FFI types/constants ----
 #[repr(C)]
 struct MEMORY_BASIC_INFORMATION64 {
     BaseAddress: PVOID,
