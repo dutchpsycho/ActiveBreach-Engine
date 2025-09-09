@@ -155,7 +155,8 @@ unsafe fn _SwGetPage(profile: Profile) -> Option<StackBase> {
 ///
 /// # Returns
 /// A pointer (`usize`) to the base of the fake stack (SP value).
-pub fn Sidewinder(nt_name: &str, stub: *mut u8) -> Option<usize> {
+pub fn AbStackWinder(nt_name: &str, stub: *mut u8) -> Option<usize> {
+
     let profile = match nt_name {
         n if n.starts_with("NtOpenProcess")
             || n.starts_with("NtTerminateProcess") => Profile::Process,
@@ -178,7 +179,7 @@ pub fn Sidewinder(nt_name: &str, stub: *mut u8) -> Option<usize> {
 
     let base = unsafe { _SwGetPage(profile)? };
     let mut sp = unsafe { ((base.add(SW_STACK_SIZE / 8) as usize) & !0xF) as *mut u64 };
-
+    
     unsafe {
         sp = sp.offset(-1);
         sp.write(stub_ret);
@@ -197,6 +198,7 @@ pub fn Sidewinder(nt_name: &str, stub: *mut u8) -> Option<usize> {
 /// # Safety
 /// Assumes all input DLLs are loaded and valid PE format.
 unsafe fn _SwAllocStatic(pairs: &[(&str, &str)]) -> Result<&'static [u64], &'static str> {
+
     let mut v = Vec::with_capacity(pairs.len());
     for &(m, e) in pairs {
         v.push(_SwResExp(m, e)?);
@@ -218,6 +220,7 @@ unsafe fn _SwAllocStatic(pairs: &[(&str, &str)]) -> Result<&'static [u64], &'sta
 /// # Returns
 /// Absolute address of the export as `u64`, or error.
 unsafe fn _SwResExp(module: &str, export: &str) -> Result<u64, &'static str> {
+
     let mod_name = cstr(module);
     let base = GetModuleHandleA(mod_name.as_ptr()) as usize;
     if base == 0 { return Err("GetModuleHandleA failed"); }
@@ -235,7 +238,7 @@ unsafe fn _SwResExp(module: &str, export: &str) -> Result<u64, &'static str> {
     let names = base + exp.AddressOfNames as usize;
     let funcs = base + exp.AddressOfFunctions as usize;
     let ords  = base + exp.AddressOfNameOrdinals as usize;
-
+    
     for i in 0..exp.NumberOfNames {
         let name_rva = *(names.add(i as usize * 4) as *const u32) as usize;
         let name_ptr = base + name_rva;

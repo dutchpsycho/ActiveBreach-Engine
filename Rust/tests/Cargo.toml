@@ -1,5 +1,5 @@
 [package]
-name = "activebreach-harness"
+name = "activebreach_harness"
 version = "0.1.0"
 edition = "2021"
 license = "CC-BY-NC-4.0"

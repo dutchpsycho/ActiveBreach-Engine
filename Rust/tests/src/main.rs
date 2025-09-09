@@ -30,6 +30,7 @@
 //! ## Safety
 //! This program uses unsafe NT API calls and raw pointers but is isolated in test context.
 //! All handles are either self handles or ephemeral.
+//!
 
 use std::{
     ptr::null_mut,
@@ -54,6 +55,7 @@ use winapi::{
 
 use activebreach::{ab_call, activebreach_launch};
 use activebreach::internal::exports::{get_syscall_table, SYSCALL_TABLE};
+
 use winapi::shared::ntdef::OBJECT_ATTRIBUTES;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -196,7 +198,7 @@ struct CLIENT_ID {
     UniqueThread: winapi::shared::ntdef::HANDLE,
 }
 
-    
+
 
     if let Some(table) = get_syscall_table() {
         for (name, id) in table.iter() {

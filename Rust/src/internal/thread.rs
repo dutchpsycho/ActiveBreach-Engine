@@ -43,6 +43,7 @@ const OFFSET_TEB_START_ADDR: usize = 0x1720;
 /// - Stub creation fails.
 /// - The syscall itself returns a non-zero status.
 pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
+    
     let mut mapped_size = 0;
     let (mapped_base, _) = mapper::buffer(&mut mapped_size)
         .ok_or_else(|| ABErr(ABError::ThreadFilemapFail))?;
@@ -87,6 +88,7 @@ pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
         *mut HANDLE, u32, *mut u8, HANDLE, *mut u8, *mut u8,
         u32, usize, usize, usize, *mut u8
     ) -> i32 = std::mem::transmute(stub_ptr);
+
 
     let mut thread: HANDLE = null_mut();
     let status = syscall(
