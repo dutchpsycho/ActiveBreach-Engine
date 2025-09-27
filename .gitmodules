@@ -7,3 +7,9 @@
 [submodule "Konflict"]
 	path = Konflict
 	url = https://github.com/TITAN-Softwork-Solutions/Konflict
+[submodule "KFD-Enterprise-Version"]
+	path = KFD-Enterprise-Version
+	url = https://github.com/dutchpsycho/KFD
+[submodule "KFD Enterprise Version"]
+	path = KFD Enterprise Version
+	url = https://github.com/dutchpsycho/KFD
