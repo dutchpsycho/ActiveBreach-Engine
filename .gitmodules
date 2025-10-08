@@ -10,3 +10,6 @@
 [submodule "KFD-Enterprise-Version"]
 	path = KFD-Enterprise-Version
 	url = https://github.com/dutchpsycho/KFD
+[submodule "KFD-EDR-Version"]
+	path = KFD-EDR-Version
+	url = https://github.com/dutchpsycho/KFD.git
