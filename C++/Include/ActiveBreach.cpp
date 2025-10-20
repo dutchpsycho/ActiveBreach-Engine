@@ -1141,7 +1141,6 @@ namespace ActiveBreach {
         SubmitThreadpoolWork(work);
 
         DWORD w = WaitForSingleObject(req->complete, 5000);
-<<<<<<< HEAD
 
         if (w == WAIT_TIMEOUT) {
             WaitForThreadpoolWorkCallbacks(work, TRUE);
@@ -1152,9 +1151,9 @@ namespace ActiveBreach {
         }
 
         WaitForThreadpoolWorkCallbacks(work, FALSE);
-=======
-        CloseHandle(req->complete); // hi, damon here. no clue why crashes occur here on debug builds! "An invalid handle was specified.", if you find a fix PR!
->>>>>>> fc40a2774263f85827499e3727b87936e106a33e
+
+        CloseHandle(req->complete); // fixed now
+
         CloseThreadpoolWork(work);
 
 #ifdef AB_DEBUG
