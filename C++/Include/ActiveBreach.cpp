@@ -1083,7 +1083,6 @@ namespace ActiveBreach {
 
             Callback::Callback(req->state);
             SetEvent(req->complete);
-            delete req;
         }
 
         DWORD WINAPI ThreadProc(LPVOID) {
@@ -1132,7 +1131,7 @@ namespace ActiveBreach {
         ActiveBreachDebugger::Start(name, arg_count, req->args);
 #endif
 
-        auto work = CreateThreadpoolWork(Dispatch::TPWork, req, nullptr);
+        PTP_WORK work = CreateThreadpoolWork(Dispatch::TPWork, req, nullptr);
         if (!work) {
             CloseHandle(req->complete);
             delete req;
@@ -1142,14 +1141,30 @@ namespace ActiveBreach {
         SubmitThreadpoolWork(work);
 
         DWORD w = WaitForSingleObject(req->complete, 5000);
+<<<<<<< HEAD
+
+        if (w == WAIT_TIMEOUT) {
+            WaitForThreadpoolWorkCallbacks(work, TRUE);
+            CloseThreadpoolWork(work);
+            CloseHandle(req->complete);
+            delete req;
+            return 0;
+        }
+
+        WaitForThreadpoolWorkCallbacks(work, FALSE);
+=======
         CloseHandle(req->complete); // hi, damon here. no clue why crashes occur here on debug builds! "An invalid handle was specified.", if you find a fix PR!
+>>>>>>> fc40a2774263f85827499e3727b87936e106a33e
         CloseThreadpoolWork(work);
 
 #ifdef AB_DEBUG
         ActiveBreachDebugger::Return(name, static_cast<NTSTATUS>(req->ret & 0xFFFFFFFF));
 #endif
 
-        return (w == WAIT_OBJECT_0) ? req->ret : 0;
+        ULONG_PTR ret = req->ret;
+        CloseHandle(req->complete);
+        delete req;
+        return ret;
     }
 }
 
