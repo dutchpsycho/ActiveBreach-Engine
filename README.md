@@ -29,14 +29,13 @@ Several limitations are common across these tools:
 
 ABE works around *most* of these constraints, with the rust version offering the most advanced implementation.
 
-From stringless ``ntdll.dll`` loading, in-memory execution and page protection flipping & encryption, ABE makes use of more thought-out and revamped concepts.
+For an in-depth look at the techniques used by ABE, I encourage you to look at the code to see for yourself.
 
-I'm not going to go through all the workarounds ABE uses as there's so many of them, I encourage you to look at the code to see for yourself.
+Diagrams to visualize ABE's flow and detection prevention mechanisms;
 
-ABE also introduces these helpers (On C++ version)
+![ActiveBreach Hooking Diagram](./Diagram/ABE.png)
 
-* **Anti-Tamper instrumentation**, which validates thread state, PEB/TEB integrity, and call origins
-* **Debugging & symbolic tracing**, optionally enabled via `AB_DEBUG`, allowing runtime inspection of syscall arguments, return values, and violation counters
+![ActiveBreach Memory Scanning Diagram](./Diagram/ABE_MEM_SCAN.png) ![ActiveBreach String-Byte Scanning Diagram](./Diagram/ABE_STRINGBYTE_MATCH.png)
 
 ---
 
@@ -48,21 +47,16 @@ There's 3 versions of ABE, select based on what you're looking for.
 * C++ - Larger footprint, uses C++ 17/20, includes Anti-Tamper & Debugging
 * Rust - Largest, most advanced, includes JIT-memory-encryption & is truly stringless
 
+These helpers are also introduced on the C++ version;
+
+* **Anti-Tamper instrumentation**, which validates thread state, PEB/TEB integrity, and call origins
+* **Debugging & symbolic tracing**, optionally enabled via `AB_DEBUG`, allowing runtime inspection of syscall arguments, return values, and violation counters
+
 ### Test Coverage
 
 For C & C++, they can be found in the solution *(.sln)*.
 
 For Rust, it can be found in ``/tests/``
-
----
-
-### Example: Hooked API Flow vs ActiveBreach
-
-![ActiveBreach Hooking Diagram](./Diagram/ABE.png)
-
-![ActiveBreach Memory Scanning Diagram](./Diagram/ABE_MEM_SCAN.png) ![ActiveBreach String-Byte Scanning Diagram](./Diagram/ABE_STRINGBYTE_MATCH.png)
-
----
 
 ## Usage
 See [USAGE.md](USAGE.md) for full setup & examples in **C, C++ & Rust**.
