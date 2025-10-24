@@ -59,6 +59,9 @@ For Rust, it can be found in ``/tests/``
 ### Example: Hooked API Flow vs ActiveBreach
 
 ![ActiveBreach Hooking Diagram](./Diagram/ABE.png)
+
+![ActiveBreach Memory Scanning Diagram](./Diagram/ABE_MEM_SCAN.png) ![ActiveBreach String-Byte Scanning Diagram](./Diagram/ABE_STRINGBYTE_MATCH.png)
+
 ---
 
 ## Usage
