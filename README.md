@@ -33,9 +33,9 @@ For an in-depth look at the techniques used by ABE, I encourage you to look at t
 
 Diagrams to visualize ABE's flow and detection prevention mechanisms;
 
-![ActiveBreach Hooking Diagram](./Diagram/ABE.png)
+![ActiveBreach Hooking Diagram](./Diagram/AB.png)
 
-![ActiveBreach Memory Scanning Diagram](./Diagram/ABE_MEM_SCAN.png) ![ActiveBreach String-Byte Scanning Diagram](./Diagram/ABE_STRINGBYTE_MATCH.png)
+![ActiveBreach Memory Scanning Diagram](./Diagram/AB_DYNAMIC.png) ![ActiveBreach String-Byte Scanning Diagram](./Diagram/AB_STATIC.png)
 
 ---
 
