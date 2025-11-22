@@ -2,7 +2,7 @@
 
 ## ActiveBreach Engine
 
-ABE aspires to be SysWhispers & Hell’s Gate Successor. It takes the concepts used and turns it into a fully functional framework.
+ABE is a successor to SysWhispers & Hells Gate. It takes the concepts used and turns it into a fully dynamic framework.
 
 Originally inspired by a blogpost by [MDSEC](https://www.mdsec.co.uk/2020/12/bypassing-user-mode-hooks-and-direct-invocation-of-system-calls-for-red-teams/).
 
