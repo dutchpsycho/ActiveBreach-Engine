@@ -1,5 +1,3 @@
-![TITAN](https://avatars.githubusercontent.com/u/199383721?s=200&v=4)
-
 ## ActiveBreach Engine
 
 ABE is a successor to SysWhispers & Hells Gate. It takes the concepts used and turns it into a fully dynamic framework.
@@ -60,14 +58,6 @@ For Rust, it can be found in ``/tests/``
 
 ## Usage
 See [USAGE.md](USAGE.md) for full setup & examples in **C, C++ & Rust**.
-
----
-
-## License
-
-**Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)**  
-
-[Full License](https://creativecommons.org/licenses/by-nc/4.0/)
 
 ---
 
