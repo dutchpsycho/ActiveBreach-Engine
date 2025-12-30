@@ -8,7 +8,7 @@ Originally inspired by a blogpost by [MDSEC](https://www.mdsec.co.uk/2020/12/byp
 
 ### What does ActiveBreach do differently?
 
-Common syscall frameworks like **SysWhispers** and **Hell's Gate** provide static wrappers or inject precompiled stubs to provide direct system call execution. While effective, these approaches leave much room for improvement and do not address critical security vulnerabilites and detection mechanisms that can be used to detect such methods.
+Common syscall frameworks like **SysWhispers** and **HellsGate** provide static wrappers or inject precompiled stubs to provide direct system call execution. While effective, these approaches leave much room for improvement and do not address critical security vulnerabilites and detection mechanisms that can be used to detect such methods.
 
 Several limitations are common across these tools:
 
