@@ -98,8 +98,9 @@ macro_rules! AbOut {
         #[cfg(debug_assertions)]
         {
             use std::ffi::CString;
-            use winapi::um::debugapi::OutputDebugStringA;
-            use winapi::um::processthreadsapi::GetCurrentThreadId;
+            use windows::core::PCSTR;
+            use windows::Win32::System::Diagnostics::Debug::OutputDebugStringA;
+            use windows::Win32::System::Threading::GetCurrentThreadId;
 
             let module_path = module_path!();
             let tag = module_path.split("::").last().unwrap_or("UNKNOWN");
@@ -111,12 +112,12 @@ macro_rules! AbOut {
                 tid,
                 format!($($arg)*)
             );
-            
+
             println!("{}", msg);
-            
+
             unsafe {
                 if let Ok(cmsg) = CString::new(msg) {
-                    OutputDebugStringA(cmsg.as_ptr());
+                    OutputDebugStringA(PCSTR(cmsg.as_ptr() as *const u8));
                 }
             }
         }

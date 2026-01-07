@@ -3,12 +3,20 @@
 use once_cell::sync::OnceCell;
 use std::ops::Add;
 use std::{ptr::null_mut, ffi::CString};
-use winapi::um::{
-    libloaderapi::GetModuleHandleA,
-    memoryapi::VirtualAlloc,
-    winnt::{IMAGE_DOS_HEADER, IMAGE_NT_HEADERS64, IMAGE_EXPORT_DIRECTORY,
-            IMAGE_DIRECTORY_ENTRY_EXPORT, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE},
+
+use windows::core::PCSTR;
+use windows::Win32::System::LibraryLoader::GetModuleHandleA;
+use windows::Win32::System::Memory::{
+    VirtualAlloc,
+    MEM_COMMIT,
+    MEM_RESERVE,
+    PAGE_READWRITE,
 };
+use windows::Win32::System::SystemServices::{
+    IMAGE_DOS_HEADER,
+    IMAGE_EXPORT_DIRECTORY,
+};
+use windows::Win32::System::Diagnostics::Debug::{IMAGE_NT_HEADERS64, IMAGE_DIRECTORY_ENTRY_EXPORT};
 
 /// Total size of each synthetic stack page, per thread/profile (in bytes).
 const SW_STACK_SIZE: usize = 0x1000;
@@ -132,7 +140,7 @@ unsafe fn _SwGetPage(profile: Profile) -> Option<StackBase> {
             Some(ptr)
         } else {
             let p = VirtualAlloc(
-                null_mut(),
+                None,
                 SW_STACK_SIZE,
                 MEM_COMMIT | MEM_RESERVE,
                 PAGE_READWRITE,
@@ -178,8 +186,9 @@ pub fn AbStackWinder(nt_name: &str, stub: *mut u8) -> Option<usize> {
     };
 
     let base = unsafe { _SwGetPage(profile)? };
-    let mut sp = unsafe { ((base.add(SW_STACK_SIZE / 8) as usize) & !0xF) as *mut u64 };
-    
+    let mut sp =
+        unsafe { ((base.add(SW_STACK_SIZE / 8) as usize) & !0xF) as *mut u64 };
+
     unsafe {
         sp = sp.offset(-1);
         sp.write(stub_ret);
@@ -197,7 +206,9 @@ pub fn AbStackWinder(nt_name: &str, stub: *mut u8) -> Option<usize> {
 ///
 /// # Safety
 /// Assumes all input DLLs are loaded and valid PE format.
-unsafe fn _SwAllocStatic(pairs: &[(&str, &str)]) -> Result<&'static [u64], &'static str> {
+unsafe fn _SwAllocStatic(
+    pairs: &[(&str, &str)],
+) -> Result<&'static [u64], &'static str> {
 
     let mut v = Vec::with_capacity(pairs.len());
     for &(m, e) in pairs {
@@ -219,36 +230,58 @@ unsafe fn _SwAllocStatic(pairs: &[(&str, &str)]) -> Result<&'static [u64], &'sta
 ///
 /// # Returns
 /// Absolute address of the export as `u64`, or error.
-unsafe fn _SwResExp(module: &str, export: &str) -> Result<u64, &'static str> {
+unsafe fn _SwResExp(
+    module: &str,
+    export: &str,
+) -> Result<u64, &'static str> {
 
     let mod_name = cstr(module);
-    let base = GetModuleHandleA(mod_name.as_ptr()) as usize;
-    if base == 0 { return Err("GetModuleHandleA failed"); }
+
+    let hmod = GetModuleHandleA(PCSTR(mod_name.as_ptr() as *const u8))
+        .map_err(|_| "GetModuleHandleA failed")?;
+    let base = hmod.0 as usize;
 
     let dos = &*(base as *const IMAGE_DOS_HEADER);
-    if dos.e_magic != 0x5A4D { return Err("Bad DOS header"); }
+    if dos.e_magic != 0x5A4D {
+        return Err("Bad DOS header");
+    }
 
-    let nt = &*((base + dos.e_lfanew as usize) as *const IMAGE_NT_HEADERS64);
-    if nt.Signature != 0x0000_4550 { return Err("Bad NT header"); }
+    let nt =
+        &*((base + dos.e_lfanew as usize) as *const IMAGE_NT_HEADERS64);
+    if nt.Signature != 0x0000_4550 {
+        return Err("Bad NT header");
+    }
 
-    let dir = nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT as usize].VirtualAddress;
-    if dir == 0 { return Err("No export dir"); }
+    let dir = nt.OptionalHeader.DataDirectory
+        [IMAGE_DIRECTORY_ENTRY_EXPORT.0 as usize]
+        .VirtualAddress;
+    if dir == 0 {
+        return Err("No export dir");
+    }
 
-    let exp = &*((base + dir as usize) as *const IMAGE_EXPORT_DIRECTORY);
+    let exp =
+        &*((base + dir as usize) as *const IMAGE_EXPORT_DIRECTORY);
     let names = base + exp.AddressOfNames as usize;
     let funcs = base + exp.AddressOfFunctions as usize;
     let ords  = base + exp.AddressOfNameOrdinals as usize;
-    
+
     for i in 0..exp.NumberOfNames {
-        let name_rva = *(names.add(i as usize * 4) as *const u32) as usize;
+        let name_rva =
+            *(names.add(i as usize * 4) as *const u32) as usize;
         let name_ptr = base + name_rva;
-        let bytes = core::slice::from_raw_parts(name_ptr as *const u8, export.len());
+        let bytes = core::slice::from_raw_parts(
+            name_ptr as *const u8,
+            export.len(),
+        );
         if bytes == export.as_bytes() {
-            let ord_idx = *(ords.add(i as usize * 2) as *const u16) as usize;
-            let func_rva = *(funcs.add(ord_idx * 4) as *const u32) as usize;
+            let ord_idx =
+                *(ords.add(i as usize * 2) as *const u16) as usize;
+            let func_rva =
+                *(funcs.add(ord_idx * 4) as *const u32) as usize;
             return Ok((base + func_rva) as u64);
         }
     }
+
     Err("Export not found")
 }
 

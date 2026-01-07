@@ -1,19 +1,20 @@
 use rustc_hash::FxHashMap;
 use std::{borrow::Cow, ffi::CStr, os::raw::c_char, slice};
-use winapi::{
-    shared::minwindef::ULONG,
-    um::{
-        errhandlingapi::RaiseException,
-        winnt::{
-            IMAGE_DOS_HEADER, IMAGE_NT_HEADERS, IMAGE_EXPORT_DIRECTORY, IMAGE_SECTION_HEADER,
-        },
-    },
+
+use windows::Win32::System::Diagnostics::Debug::RaiseException;
+use windows::Win32::System::SystemServices::{
+    IMAGE_DOS_HEADER,
+    IMAGE_EXPORT_DIRECTORY,
 };
+use windows::Win32::System::Diagnostics::Debug::{IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER};
+
 use once_cell::sync::OnceCell;
 
 use crate::internal::mapper::drop_ntdll;
 use crate::internal::diagnostics::*;
 use crate::AbOut;
+
+type ULONG = u32;
 
 #[link_section = ".rdata$ab"]
 pub static SYSCALL_TABLE: OnceCell<FxHashMap<String, u32>> = OnceCell::new();
@@ -45,9 +46,10 @@ unsafe fn rva_to_ptr_or_fault(
 
     for sec in sections {
         let virt_start = sec.VirtualAddress as usize;
-        let virt_size = *sec.Misc.VirtualSize() as usize;
+        let virt_size = unsafe { sec.Misc.VirtualSize as usize };
         if rva >= virt_start && rva < virt_start + virt_size {
-            let file_offset = sec.PointerToRawData as usize + (rva - virt_start);
+            let file_offset =
+                sec.PointerToRawData as usize + (rva - virt_start);
             if file_offset < size {
                 return Ok(base.add(file_offset));
             }
@@ -79,19 +81,20 @@ pub unsafe fn ExSyscalls(ntdll: *const u8, size: usize) -> Result<(), u32> {
     }
 
     let nt_offset = dos.e_lfanew as usize;
-    let nt = &*(ntdll.add(nt_offset) as *const IMAGE_NT_HEADERS);
-    if nt.Signature != 0x00004550 {
+    let nt = &*(ntdll.add(nt_offset) as *const IMAGE_NT_HEADERS64);
+    if nt.Signature != 0x0000_4550 {
         AbOut!("invalid NT signature");
         return Err(ABErr(ABError::InvalidImage));
     }
 
     let num_secs = nt.FileHeader.NumberOfSections as usize;
     let secs_ptr = ntdll
-        .add(nt_offset + std::mem::size_of::<IMAGE_NT_HEADERS>())
+        .add(nt_offset + std::mem::size_of::<IMAGE_NT_HEADERS64>())
         as *const IMAGE_SECTION_HEADER;
     let sections = slice::from_raw_parts(secs_ptr, num_secs);
 
-    let export_va = nt.OptionalHeader.DataDirectory[0].VirtualAddress as usize;
+    let export_va =
+        nt.OptionalHeader.DataDirectory[0].VirtualAddress as usize;
     let export_ptr = rva_to_ptr_or_fault(
         ntdll,
         export_va,
@@ -128,10 +131,12 @@ pub unsafe fn ExSyscalls(ntdll: *const u8, size: usize) -> Result<(), u32> {
         ABErr(ABError::ExportFail),
     )? as *const u32;
 
-    let mut map = FxHashMap::with_capacity_and_hasher(name_count, Default::default());
+    let mut map =
+        FxHashMap::with_capacity_and_hasher(name_count, Default::default());
 
     for i in 0..name_count {
-        let name_rva = std::ptr::read_unaligned(names.add(i)) as usize;
+        let name_rva =
+            std::ptr::read_unaligned(names.add(i)) as usize;
         let name_ptr = rva_to_ptr_or_fault(
             ntdll,
             name_rva,
@@ -150,7 +155,8 @@ pub unsafe fn ExSyscalls(ntdll: *const u8, size: usize) -> Result<(), u32> {
             return Err(ABErr(ABError::BadSyscall));
         }
 
-        let func_rva = std::ptr::read_unaligned(funcs.add(ord)) as usize;
+        let func_rva =
+            std::ptr::read_unaligned(funcs.add(ord)) as usize;
         let sig_ptr = rva_to_ptr_or_fault(
             ntdll,
             func_rva,
@@ -171,7 +177,8 @@ pub unsafe fn ExSyscalls(ntdll: *const u8, size: usize) -> Result<(), u32> {
             continue;
         }
 
-        let ssn = u32::from_le_bytes([sig[4], sig[5], sig[6], sig[7]]);
+        let ssn =
+            u32::from_le_bytes([sig[4], sig[5], sig[6], sig[7]]);
         let key = String::from_utf8_unchecked(name.to_vec());
         map.insert(key, ssn);
     }

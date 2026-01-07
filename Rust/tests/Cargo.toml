@@ -2,7 +2,7 @@
 name = "activebreach_harness"
 version = "0.1.0"
 edition = "2021"
-license = "CC-BY-NC-4.0"
+license = "“Commons Clause” License Condition v1.0 | Apache License"
 description = "Test harness for ActiveBreach-Engine"
 
 [dependencies]

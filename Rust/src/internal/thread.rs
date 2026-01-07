@@ -5,13 +5,21 @@
 //! - Build a direct syscall stub in RWX memory.
 
 use std::ptr::null_mut;
-use winapi::shared::ntdef::{HANDLE, NTSTATUS, PVOID};
-use winapi::um::{
-    handleapi::CloseHandle,
-    libloaderapi::GetModuleHandleA,
-    memoryapi::{VirtualAlloc, VirtualProtect, VirtualFree},
-    winnt::{MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_NOACCESS, MEM_RELEASE},
+
+use windows::Win32::Foundation::{HANDLE, NTSTATUS};
+use windows::Win32::System::Memory::{
+    VirtualAlloc,
+    VirtualProtect,
+    VirtualFree,
+    MEM_COMMIT,
+    MEM_RESERVE,
+    MEM_RELEASE,
+    PAGE_EXECUTE_READ,
+    PAGE_EXECUTE_READWRITE,
+    PAGE_NOACCESS,
 };
+use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::System::Threading::GetCurrentProcess;
 
 use crate::internal::{dispatch, exports, mapper};
 use crate::internal::diagnostics::*;
@@ -43,7 +51,7 @@ const OFFSET_TEB_START_ADDR: usize = 0x1720;
 /// - Stub creation fails.
 /// - The syscall itself returns a non-zero status.
 pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
-    
+
     let mut mapped_size = 0;
     let (mapped_base, _) = mapper::buffer(&mut mapped_size)
         .ok_or_else(|| ABErr(ABError::ThreadFilemapFail))?;
@@ -60,7 +68,8 @@ pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
         .ok_or_else(|| ABErr(ABError::ThreadNtCreateMissing))?;
 
     let stub_ptr = VirtualAlloc(
-        null_mut(), 0x20,
+        None,
+        0x20,
         MEM_COMMIT | MEM_RESERVE,
         PAGE_EXECUTE_READWRITE,
     ) as *mut u8;
@@ -70,40 +79,55 @@ pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
     }
 
     let tmpl: [u8; 11] = [
-        0x4C, 0x8B, 0xD1,       // mov r10, rcx
-        0xB8,                   // mov eax, SSN
+        0x4C, 0x8B, 0xD1,
+        0xB8,
         (ssn & 0xFF) as u8,
         ((ssn >> 8) & 0xFF) as u8,
         ((ssn >> 16) & 0xFF) as u8,
         ((ssn >> 24) & 0xFF) as u8,
-        0x0F, 0x05,             // syscall
-        0xC3,                   // ret
+        0x0F, 0x05,
+        0xC3,
     ];
     std::ptr::copy_nonoverlapping(tmpl.as_ptr(), stub_ptr, tmpl.len());
 
-    let mut old = 0;
+    let mut old = PAGE_EXECUTE_READWRITE;
     VirtualProtect(stub_ptr as _, 0x20, PAGE_EXECUTE_READ, &mut old);
 
     let syscall: unsafe extern "system" fn(
-        *mut HANDLE, u32, *mut u8, HANDLE, *mut u8, *mut u8,
-        u32, usize, usize, usize, *mut u8
+        *mut HANDLE,
+        u32,
+        *mut u8,
+        HANDLE,
+        *mut u8,
+        *mut u8,
+        u32,
+        usize,
+        usize,
+        usize,
+        *mut u8,
     ) -> i32 = std::mem::transmute(stub_ptr);
 
-
-    let mut thread: HANDLE = null_mut();
+    let mut thread: HANDLE = HANDLE(null_mut());
     let status = syscall(
         &mut thread,
         0x1FFFFF,
         null_mut(),
-        -1isize as HANDLE,
+        GetCurrentProcess(),
         dispatch::thread_proc as *mut _,
         null_mut(),
         0x00000004,
-        0, 0, 0,
+        0,
+        0,
+        0,
         null_mut(),
     );
 
-    VirtualProtect(stub_ptr as _, 0x20, PAGE_EXECUTE_READWRITE, &mut old);
+    VirtualProtect(
+        stub_ptr as _,
+        0x20,
+        PAGE_EXECUTE_READWRITE,
+        &mut old,
+    );
     std::ptr::write_bytes(stub_ptr, 0x00, 0x20);
     VirtualFree(stub_ptr as _, 0, MEM_RELEASE);
 
@@ -112,7 +136,6 @@ pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
     }
 
     CloseHandle(thread);
-
     Ok(())
 }
 
@@ -138,11 +161,21 @@ pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
 pub unsafe fn direct_syscall_stub(
     ssn: u32,
 ) -> Option<unsafe extern "system" fn(
-    *mut HANDLE, u32, *mut u8, HANDLE, *mut u8, *mut u8,
-    u32, usize, usize, usize, *mut u8
+    *mut HANDLE,
+    u32,
+    *mut u8,
+    HANDLE,
+    *mut u8,
+    *mut u8,
+    u32,
+    usize,
+    usize,
+    usize,
+    *mut u8,
 ) -> NTSTATUS> {
     let stub = VirtualAlloc(
-        null_mut(), 0x20,
+        None,
+        0x20,
         MEM_COMMIT | MEM_RESERVE,
         PAGE_EXECUTE_READWRITE,
     ) as *mut u8;
@@ -164,7 +197,7 @@ pub unsafe fn direct_syscall_stub(
 
     std::ptr::copy_nonoverlapping(tmpl.as_ptr(), stub, tmpl.len());
 
-    let mut old = 0;
+    let mut old = PAGE_EXECUTE_READWRITE;
     VirtualProtect(stub as _, 0x20, PAGE_EXECUTE_READ, &mut old);
 
     Some(std::mem::transmute(stub))

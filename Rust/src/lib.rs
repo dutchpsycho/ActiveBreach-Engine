@@ -22,7 +22,7 @@
  *      The result is a highly stealthy syscall abstraction layer optimized for
  *      evasion, speed, and dynamic reuse without persistent footprint.
  *
- *  License:      Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
+ *  License:      “Commons Clause” License Condition v1.0 Apache License
  *  Copyright:    (C) 2025 TITAN Softwork Solutions. All rights reserved.
  *
  *  Licensing Terms:
@@ -45,12 +45,15 @@
  
 pub mod internal;
 
+use core::ffi::c_void;
 use crate::internal::diagnostics::*;
 use crate::internal::dispatch::{__ActiveBreachFire, G_READY, G_OPFRAME};
 use crate::internal::exports::SYSCALL_TABLE;
 
-use winapi::um::synchapi::{WaitOnAddress, WakeByAddressSingle};
-use winapi::shared::minwindef::BOOL;
+use windows::Win32::System::Threading::{WaitOnAddress, WakeByAddressSingle, INFINITE};
+
+type BOOL = i32;
+
 use std::ptr;
 
 /// Launches the ActiveBreach syscall dispatcher thread and loads the syscall table.
@@ -120,14 +123,17 @@ pub unsafe fn ab_call(name: &str, args: &[usize]) -> usize {
 
     while !G_READY.load(std::sync::atomic::Ordering::Acquire) {
         let zero: u8 = 0;
-        unsafe {
-            WaitOnAddress(
-                &G_READY as *const _ as *mut winapi::ctypes::c_void,
-                &zero as *const _ as *mut winapi::ctypes::c_void,
-                std::mem::size_of::<u8>(),
-                u32::MAX,
-            );
-        }
+
+        let ready_ptr: *const std::sync::atomic::AtomicBool =
+            &G_READY as *const std::sync::atomic::AtomicBool;
+        let zero_ptr: *const u8 = &zero as *const u8;
+
+        let _ = WaitOnAddress(
+            ready_ptr as *const c_void,
+            zero_ptr as *const c_void,
+            std::mem::size_of::<u8>(),
+            Some(INFINITE),
+        );
     }
 
     __ActiveBreachFire(name, args)
