@@ -46,5 +46,6 @@ int main() {
         std::fprintf(stderr, "[x] failed to create dummy handle for NtClose\n");
 
     std::printf("\n=== Test Complete ===\n");
+
     return 0;
 }

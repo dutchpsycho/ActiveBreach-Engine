@@ -20,6 +20,7 @@ typedef NTSTATUS(NTAPI* NtQuerySystemInformation_t)(
 
 int main() {
     ActiveBreach_launch();
+
     std::cout << "=== ActiveBreach Test Suite (C++) ===\n\n";
 
     // TestSectionMapping(); // Ignore, my args on Nt r wrong (Not right page)
@@ -112,5 +113,6 @@ int main() {
     if (infoBuf) VirtualFree(infoBuf, 0, MEM_RELEASE);
 
     std::cout << "\n=== Test Complete ===\n";
+
     return 0;
 }
