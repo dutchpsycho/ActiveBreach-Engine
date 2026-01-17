@@ -20,18 +20,13 @@
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use windows::Win32::System::Memory::{
-    VirtualProtect,
-    PAGE_EXECUTE_READ,
-    PAGE_EXECUTE_READWRITE,
-};
+use windows::Win32::System::Memory::{VirtualProtect, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE};
 
-use crate::internal::diagnostics::{ABError, ABErr};
+use crate::internal::diagnostics::{ABErr, ABError};
 use crate::internal::exports::SYSCALL_TABLE;
 use crate::internal::stack::{AbStackWinder, SidewinderInit};
 use crate::internal::stub::{G_STUB_POOL, STUB_SIZE};
 use crate::AbOut;
-
 /// Operation frame shared between the caller and dispatcher thread.
 ///
 /// This structure contains the syscall name (SSN), arguments, and return value.
@@ -74,8 +69,22 @@ impl Default for ABOpFrame {
 /// - Must point to valid executable code
 /// - Must follow Windows syscall calling convention
 pub type ABStubFn = unsafe extern "system" fn(
-    usize, usize, usize, usize, usize, usize, usize, usize,
-    usize, usize, usize, usize, usize, usize, usize, usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
 ) -> usize;
 
 /// Shared global operation frame, uninitialized until dispatcher starts.
@@ -84,7 +93,9 @@ pub static G_READY: AtomicBool = AtomicBool::new(false);
 
 #[inline(always)]
 fn cpu_pause() {
-    unsafe { core::arch::asm!("pause", options(nomem, nostack)); }
+    unsafe {
+        core::arch::asm!("pause", options(nomem, nostack));
+    }
 }
 
 /// Syscall dispatcher thread entrypoint.
@@ -97,7 +108,6 @@ fn cpu_pause() {
 /// It assumes `G_OPFRAME` is uninitialized and will remain in memory.
 ///
 pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
-
     G_OPFRAME.write(ABOpFrame::default());
     G_READY.store(true, Ordering::Release);
     AbOut!("opframe initialized, ready flag set");
@@ -111,16 +121,19 @@ pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
         while frame.status.load(Ordering::Acquire) != 1 {
             spin += 1;
             match spin {
-                0..=64   => cpu_pause(),
+                0..=64 => cpu_pause(),
                 65..=256 => std::thread::yield_now(),
-                _        => std::thread::sleep(std::time::Duration::from_micros(50)),
+                _ => std::thread::sleep(std::time::Duration::from_micros(50)),
             }
         }
         spin = 0;
 
         let stub = match G_STUB_POOL.acquire() {
             Some(p) if !p.is_null() => p,
-            _ => { AbOut!("stub pool empty"); continue; }
+            _ => {
+                AbOut!("stub pool empty");
+                continue;
+            }
         };
 
         if stub as usize & 15 != 0 {
@@ -132,12 +145,7 @@ pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
         let ssn_ptr = stub.add(4) as *mut u32;
         let mut old = PAGE_EXECUTE_READ;
 
-        if !VirtualProtect(
-            stub as _,
-            STUB_SIZE,
-            PAGE_EXECUTE_READWRITE,
-            &mut old,
-        ).is_ok() {
+        if !VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old).is_ok() {
             AbOut!("RWX fail");
             G_STUB_POOL.release(stub);
             continue;
@@ -145,12 +153,7 @@ pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
 
         ssn_ptr.write_volatile(frame.syscall_id);
 
-        VirtualProtect(
-            stub as _,
-            STUB_SIZE,
-            PAGE_EXECUTE_READ,
-            &mut old,
-        ).ok();
+        VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READ, &mut old).ok();
 
         let fn_ptr: ABStubFn = std::mem::transmute(stub);
 
@@ -158,10 +161,8 @@ pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
         regs[..frame.arg_count].copy_from_slice(&frame.args[..frame.arg_count]);
 
         let ret = fn_ptr(
-            regs[0], regs[1], regs[2], regs[3],
-            regs[4], regs[5], regs[6], regs[7],
-            regs[8], regs[9], regs[10], regs[11],
-            regs[12], regs[13], regs[14], regs[15],
+            regs[0], regs[1], regs[2], regs[3], regs[4], regs[5], regs[6], regs[7], regs[8],
+            regs[9], regs[10], regs[11], regs[12], regs[13], regs[14], regs[15],
         );
 
         std::sync::atomic::fence(Ordering::SeqCst);
@@ -174,7 +175,6 @@ pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
 
 #[inline(always)]
 pub unsafe fn __ActiveBreachFire(name: &str, args: &[usize]) -> usize {
-
     let tbl = match SYSCALL_TABLE.get() {
         Some(t) => t,
         None => return ABErr(ABError::DispatchTableMissing) as usize,
@@ -198,24 +198,14 @@ pub unsafe fn __ActiveBreachFire(name: &str, args: &[usize]) -> usize {
     let ssn_ptr = stub.add(4) as *mut u32;
     let mut old = PAGE_EXECUTE_READ;
 
-    if !VirtualProtect(
-        stub as _,
-        STUB_SIZE,
-        PAGE_EXECUTE_READWRITE,
-        &mut old,
-    ).is_ok() {
+    if !VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old).is_ok() {
         G_STUB_POOL.release(stub);
         return ABErr(ABError::DispatchProtectFail) as usize;
     }
 
     ssn_ptr.write_volatile(ssn);
 
-    VirtualProtect(
-        stub as _,
-        STUB_SIZE,
-        PAGE_EXECUTE_READ,
-        &mut old,
-    ).ok();
+    VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READ, &mut old).ok();
 
     let frame = &mut *G_OPFRAME.as_mut_ptr();
 

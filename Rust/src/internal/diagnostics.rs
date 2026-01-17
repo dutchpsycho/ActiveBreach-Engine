@@ -56,21 +56,40 @@ fn hash_err(name: &str) -> u32 {
 pub static ERROR_CODES: Lazy<Mutex<HashMap<ABError, u32>>> = Lazy::new(|| {
     let mut map = HashMap::new();
     for err in [
-        ABError::NotInit, ABError::AlreadyInit, ABError::Null,
-        ABError::InvalidImage, ABError::InvalidSection, ABError::InvalidRva,
-        ABError::ExportFail, ABError::BadSyscall,
-        ABError::StubAllocFail, ABError::StubAlignFail, ABError::StubProtectRwFail,
-        ABError::StubProtectRxFail, ABError::StubProtectNoAccessFail,
-        ABError::StubEncryptFail, ABError::StubDecryptFail,
-        ABError::StubPoolExhausted, ABError::StubReleaseMiss,
-        ABError::ThreadFilemapFail, ABError::ThreadSyscallInitFail, ABError::ThreadSyscallTableMiss,
-        ABError::ThreadNtCreateMissing, ABError::ThreadStubAllocFail,
-        ABError::ThreadCreateFail, ABError::ThreadTEBCorruptSkip,
-        ABError::DispatchNameTooLong, ABError::DispatchArgTooMany,
-        ABError::DispatchNotReady, ABError::DispatchTableMissing,
-        ABError::DispatchSyscallMissing, ABError::DispatchFrameTimeout,
-        ABError::DispatchStubAllocFail, ABError::DispatchStubMisaligned,
-        ABError::DispatchProtectFail, ABError::VEHInitFail,
+        ABError::NotInit,
+        ABError::AlreadyInit,
+        ABError::Null,
+        ABError::InvalidImage,
+        ABError::InvalidSection,
+        ABError::InvalidRva,
+        ABError::ExportFail,
+        ABError::BadSyscall,
+        ABError::StubAllocFail,
+        ABError::StubAlignFail,
+        ABError::StubProtectRwFail,
+        ABError::StubProtectRxFail,
+        ABError::StubProtectNoAccessFail,
+        ABError::StubEncryptFail,
+        ABError::StubDecryptFail,
+        ABError::StubPoolExhausted,
+        ABError::StubReleaseMiss,
+        ABError::ThreadFilemapFail,
+        ABError::ThreadSyscallInitFail,
+        ABError::ThreadSyscallTableMiss,
+        ABError::ThreadNtCreateMissing,
+        ABError::ThreadStubAllocFail,
+        ABError::ThreadCreateFail,
+        ABError::ThreadTEBCorruptSkip,
+        ABError::DispatchNameTooLong,
+        ABError::DispatchArgTooMany,
+        ABError::DispatchNotReady,
+        ABError::DispatchTableMissing,
+        ABError::DispatchSyscallMissing,
+        ABError::DispatchFrameTimeout,
+        ABError::DispatchStubAllocFail,
+        ABError::DispatchStubMisaligned,
+        ABError::DispatchProtectFail,
+        ABError::VEHInitFail,
     ] {
         let key = format!("{:?}", err);
         let code = hash_err(&key);
@@ -83,7 +102,11 @@ pub static ERROR_CODES: Lazy<Mutex<HashMap<ABError, u32>>> = Lazy::new(|| {
 pub fn ABErr(kind: ABError) -> u32 {
     #[cfg(debug_assertions)]
     {
-        *ERROR_CODES.lock().unwrap().get(&kind).unwrap_or(&0xABDE_DEAD)
+        *ERROR_CODES
+            .lock()
+            .unwrap()
+            .get(&kind)
+            .unwrap_or(&0xABDE_DEAD)
     }
 
     #[cfg(not(debug_assertions))]

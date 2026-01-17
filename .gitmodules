@@ -13,3 +13,12 @@
 [submodule "KFD-EDR-Version"]
 	path = KFD-EDR-Version
 	url = https://github.com/dutchpsycho/KFD.git
+[submodule "C"]
+	path = C
+	url = git@github.com:dutchpsycho/ActiveBreach-C.git
+[submodule "C++"]
+	path = C++
+	url = git@github.com:dutchpsycho/ActiveBreach-CPP.git
+[submodule "Rust"]
+	path = Rust
+	url = git@github.com:dutchpsycho/ActiveBreach-Rust.git

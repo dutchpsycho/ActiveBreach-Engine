@@ -2,16 +2,13 @@ use rustc_hash::FxHashMap;
 use std::{borrow::Cow, ffi::CStr, os::raw::c_char, slice};
 
 use windows::Win32::System::Diagnostics::Debug::RaiseException;
-use windows::Win32::System::SystemServices::{
-    IMAGE_DOS_HEADER,
-    IMAGE_EXPORT_DIRECTORY,
-};
 use windows::Win32::System::Diagnostics::Debug::{IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER};
+use windows::Win32::System::SystemServices::{IMAGE_DOS_HEADER, IMAGE_EXPORT_DIRECTORY};
 
 use once_cell::sync::OnceCell;
 
-use crate::internal::mapper::drop_ntdll;
 use crate::internal::diagnostics::*;
+use crate::internal::mapper::drop_ntdll;
 use crate::AbOut;
 
 type ULONG = u32;
@@ -88,20 +85,14 @@ pub unsafe fn ExSyscalls(ntdll: *const u8, size: usize) -> Result<(), u32> {
     }
 
     let num_secs = nt.FileHeader.NumberOfSections as usize;
-    let secs_ptr = ntdll
-        .add(nt_offset + std::mem::size_of::<IMAGE_NT_HEADERS64>())
+    let secs_ptr = ntdll.add(nt_offset + std::mem::size_of::<IMAGE_NT_HEADERS64>())
         as *const IMAGE_SECTION_HEADER;
     let sections = slice::from_raw_parts(secs_ptr, num_secs);
 
-    let export_va =
-        nt.OptionalHeader.DataDirectory[0].VirtualAddress as usize;
-    let export_ptr = rva_to_ptr_or_fault(
-        ntdll,
-        export_va,
-        size,
-        sections,
-        ABErr(ABError::ExportFail),
-    )? as *const IMAGE_EXPORT_DIRECTORY;
+    let export_va = nt.OptionalHeader.DataDirectory[0].VirtualAddress as usize;
+    let export_ptr =
+        rva_to_ptr_or_fault(ntdll, export_va, size, sections, ABErr(ABError::ExportFail))?
+            as *const IMAGE_EXPORT_DIRECTORY;
     let export = &*export_ptr;
 
     let name_count = export.NumberOfNames as usize;
@@ -135,15 +126,10 @@ pub unsafe fn ExSyscalls(ntdll: *const u8, size: usize) -> Result<(), u32> {
         FxHashMap::with_capacity_and_hasher(name_count, Default::default());
 
     for i in 0..name_count {
-        let name_rva =
-            std::ptr::read_unaligned(names.add(i)) as usize;
-        let name_ptr = rva_to_ptr_or_fault(
-            ntdll,
-            name_rva,
-            size,
-            sections,
-            ABErr(ABError::BadSyscall),
-        )? as *const c_char;
+        let name_rva = std::ptr::read_unaligned(names.add(i)) as usize;
+        let name_ptr =
+            rva_to_ptr_or_fault(ntdll, name_rva, size, sections, ABErr(ABError::BadSyscall))?
+                as *const c_char;
 
         let name = CStr::from_ptr(name_ptr).to_bytes();
         if name.len() < 3 || &name[..2] != b"Nt" {
@@ -155,22 +141,14 @@ pub unsafe fn ExSyscalls(ntdll: *const u8, size: usize) -> Result<(), u32> {
             return Err(ABErr(ABError::BadSyscall));
         }
 
-        let func_rva =
-            std::ptr::read_unaligned(funcs.add(ord)) as usize;
-        let sig_ptr = rva_to_ptr_or_fault(
-            ntdll,
-            func_rva,
-            size,
-            sections,
-            ABErr(ABError::BadSyscall),
-        )?;
+        let func_rva = std::ptr::read_unaligned(funcs.add(ord)) as usize;
+        let sig_ptr =
+            rva_to_ptr_or_fault(ntdll, func_rva, size, sections, ABErr(ABError::BadSyscall))?;
 
         let sig = slice::from_raw_parts(sig_ptr, 8);
         let valid = matches!(
             sig,
-            [0x4C, 0x8B, 0xD1, 0xB8, ..]
-                | [0xB8, ..]
-                | [0x4D, 0x8B, 0xD1, 0xB8, ..]
+            [0x4C, 0x8B, 0xD1, 0xB8, ..] | [0xB8, ..] | [0x4D, 0x8B, 0xD1, 0xB8, ..]
         );
 
         if !valid {

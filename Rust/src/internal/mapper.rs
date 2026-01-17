@@ -10,12 +10,7 @@ use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HANDLE, NTSTATUS, UNICODE_STRING};
 use windows::Win32::Storage::FileSystem::QueryDosDeviceW;
 use windows::Win32::System::Memory::{
-    VirtualAlloc,
-    VirtualFree,
-    MEM_COMMIT,
-    MEM_RELEASE,
-    MEM_RESERVE,
-    PAGE_READWRITE,
+    VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
 };
 use windows::Win32::System::Threading::GetCurrentProcess;
 
@@ -64,17 +59,11 @@ const MemorySectionName: u32 = 2;
 unsafe fn nt_device_path_to_dos_path(nt_path: &str) -> Option<String> {
     for letter in b'A'..=b'Z' {
         let drive = format!("{}:", letter as char);
-        let drive_w: Vec<u16> = OsStr::new(&drive)
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
+        let drive_w: Vec<u16> = OsStr::new(&drive).encode_wide().chain(Some(0)).collect();
 
         let mut buf = vec![0u16; 1024];
 
-        let len = QueryDosDeviceW(
-            PCWSTR(drive_w.as_ptr()),
-            Some(buf.as_mut_slice()),
-        );
+        let len = QueryDosDeviceW(PCWSTR(drive_w.as_ptr()), Some(buf.as_mut_slice()));
 
         if len == 0 {
             continue;
@@ -163,14 +152,9 @@ unsafe fn get_module_path_from_base_ntqvm(base: *mut u8) -> Option<String> {
         return None;
     }
 
-    let wide = std::slice::from_raw_parts(
-        us.Buffer.0,
-        (us.Length / 2) as usize,
-    );
+    let wide = std::slice::from_raw_parts(us.Buffer.0, (us.Length / 2) as usize);
 
-    let nt_path = OsString::from_wide(wide)
-        .to_string_lossy()
-        .to_string();
+    let nt_path = OsString::from_wide(wide).to_string_lossy().to_string();
 
     nt_device_path_to_dos_path(&nt_path).or(Some(nt_path))
 }
@@ -192,12 +176,7 @@ pub unsafe fn buffer(size_out: &mut usize) -> Option<(*const u8, HANDLE)> {
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).ok()?;
 
-    let alloc = VirtualAlloc(
-        None,
-        buf.len(),
-        MEM_COMMIT | MEM_RESERVE,
-        PAGE_READWRITE,
-    ) as *mut u8;
+    let alloc = VirtualAlloc(None, buf.len(), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) as *mut u8;
 
     if alloc.is_null() {
         return None;

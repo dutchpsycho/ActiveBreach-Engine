@@ -45,7 +45,7 @@ use std::{
 use winapi::{
     shared::{
         minwindef::{DWORD, LPVOID, ULONG},
-        ntdef::{HANDLE, BOOLEAN},
+        ntdef::{BOOLEAN, HANDLE},
     },
     um::{
         processthreadsapi::{GetCurrentThreadId, OpenThread},
@@ -53,8 +53,8 @@ use winapi::{
     },
 };
 
-use activebreach::{ab_call, activebreach_launch};
 use activebreach::internal::exports::{get_syscall_table, SYSCALL_TABLE};
+use activebreach::{ab_call, activebreach_launch};
 
 use winapi::shared::ntdef::OBJECT_ATTRIBUTES;
 
@@ -84,10 +84,7 @@ extern "system" {
         ThreadInformationLength: ULONG,
     ) -> ULONG;
 
-    fn NtDelayExecution(
-        Alertable: BOOLEAN,
-        DelayInterval: *mut i64,
-    ) -> ULONG;
+    fn NtDelayExecution(Alertable: BOOLEAN, DelayInterval: *mut i64) -> ULONG;
 
     fn NtClose(Handle: HANDLE) -> ULONG;
 
@@ -135,7 +132,9 @@ static TLS_INIT: extern "system" fn(LPVOID, DWORD, LPVOID) = tls_callback;
 
 extern "system" fn tls_callback(_: LPVOID, reason: DWORD, _: LPVOID) {
     if reason == DLL_PROCESS_ATTACH {
-        unsafe { let _ = activebreach_launch(); }
+        unsafe {
+            let _ = activebreach_launch();
+        }
     }
 }
 
@@ -150,8 +149,8 @@ struct CLIENT_ID {
 ////////////////////////////////////////////////////////////////////////////////
 // Descriptor for a single syscall test
 struct SyscallTest {
-    name:        &'static str,
-    ab_args:     Box<dyn Fn() -> Vec<usize> + 'static>,
+    name: &'static str,
+    ab_args: Box<dyn Fn() -> Vec<usize> + 'static>,
     direct_call: Box<dyn Fn() -> ULONG + 'static>,
 }
 
@@ -170,7 +169,6 @@ impl SyscallTest {
 }
 
 fn main() {
-
     use std::{
         io::{self, Write},
         ptr::null_mut,
@@ -193,12 +191,10 @@ fn main() {
     };
 
     #[repr(C)]
-struct CLIENT_ID {
-    UniqueProcess: winapi::shared::ntdef::HANDLE,
-    UniqueThread: winapi::shared::ntdef::HANDLE,
-}
-
-
+    struct CLIENT_ID {
+        UniqueProcess: winapi::shared::ntdef::HANDLE,
+        UniqueThread: winapi::shared::ntdef::HANDLE,
+    }
 
     if let Some(table) = get_syscall_table() {
         for (name, id) in table.iter() {

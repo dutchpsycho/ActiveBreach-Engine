@@ -2,21 +2,15 @@
 
 use once_cell::sync::OnceCell;
 use std::ops::Add;
-use std::{ptr::null_mut, ffi::CString};
+use std::{ffi::CString, ptr::null_mut};
 
 use windows::core::PCSTR;
+use windows::Win32::System::Diagnostics::Debug::{
+    IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_NT_HEADERS64,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleA;
-use windows::Win32::System::Memory::{
-    VirtualAlloc,
-    MEM_COMMIT,
-    MEM_RESERVE,
-    PAGE_READWRITE,
-};
-use windows::Win32::System::SystemServices::{
-    IMAGE_DOS_HEADER,
-    IMAGE_EXPORT_DIRECTORY,
-};
-use windows::Win32::System::Diagnostics::Debug::{IMAGE_NT_HEADERS64, IMAGE_DIRECTORY_ENTRY_EXPORT};
+use windows::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
+use windows::Win32::System::SystemServices::{IMAGE_DOS_HEADER, IMAGE_EXPORT_DIRECTORY};
 
 /// Total size of each synthetic stack page, per thread/profile (in bytes).
 const SW_STACK_SIZE: usize = 0x1000;
@@ -48,9 +42,9 @@ thread_local! {
 /// Static structure holding pre-resolved addresses of common export functions
 /// used to simulate realistic call stacks.
 struct SwStackProf {
-    memory:  &'static [u64],
+    memory: &'static [u64],
     process: &'static [u64],
-    thread:  &'static [u64],
+    thread: &'static [u64],
     mapping: &'static [u64],
 }
 
@@ -74,12 +68,12 @@ pub unsafe fn SidewinderInit() -> Result<(), &'static str> {
                 ("KERNELBASE.DLL", "VirtualAlloc"),
                 ("KERNELBASE.DLL", "VirtualFree"),
                 ("KERNELBASE.DLL", "VirtualProtect"),
-                ("KERNEL32.DLL",   "VirtualQuery"),
-                ("KERNEL32.DLL",   "GetProcessHeap"),
-                ("KERNEL32.DLL",   "HeapAlloc"),
-                ("KERNEL32.DLL",   "HeapFree"),
-                ("NTDLL.DLL",      "RtlAllocateHeap"),
-                ("NTDLL.DLL",      "RtlFreeHeap"),
+                ("KERNEL32.DLL", "VirtualQuery"),
+                ("KERNEL32.DLL", "GetProcessHeap"),
+                ("KERNEL32.DLL", "HeapAlloc"),
+                ("KERNEL32.DLL", "HeapFree"),
+                ("NTDLL.DLL", "RtlAllocateHeap"),
+                ("NTDLL.DLL", "RtlFreeHeap"),
                 ("KERNELBASE.DLL", "LocalAlloc"),
                 ("KERNELBASE.DLL", "LocalFree"),
                 ("KERNELBASE.DLL", "MapViewOfFile"),
@@ -91,7 +85,7 @@ pub unsafe fn SidewinderInit() -> Result<(), &'static str> {
                 ("KERNEL32.DLL", "CreateProcessW"),
                 ("KERNEL32.DLL", "GetCurrentProcess"),
                 ("KERNEL32.DLL", "GetCurrentProcessId"),
-                ("NTDLL.DLL",    "RtlGetCurrentProcessId"),
+                ("NTDLL.DLL", "RtlGetCurrentProcessId"),
                 ("ADVAPI32.DLL", "OpenProcessToken"),
                 ("ADVAPI32.DLL", "LookupPrivilegeValueW"),
                 ("ADVAPI32.DLL", "AdjustTokenPrivileges"),
@@ -99,28 +93,28 @@ pub unsafe fn SidewinderInit() -> Result<(), &'static str> {
                 ("KERNEL32.DLL", "SetHandleInformation"),
             ])?,
             thread: _SwAllocStatic(&[
-                ("KERNEL32.DLL",   "CreateRemoteThreadEx"),
+                ("KERNEL32.DLL", "CreateRemoteThreadEx"),
                 ("KERNELBASE.DLL", "SuspendThread"),
                 ("KERNELBASE.DLL", "ResumeThread"),
-                ("KERNEL32.DLL",   "GetCurrentThread"),
-                ("KERNEL32.DLL",   "GetCurrentThreadId"),
-                ("KERNEL32.DLL",   "SetThreadContext"),
-                ("KERNEL32.DLL",   "GetThreadContext"),
-                ("KERNEL32.DLL",   "QueueUserAPC"),
-                ("KERNEL32.DLL",   "SleepEx"),
-                ("NTDLL.DLL",      "RtlNtStatusToDosError"),
+                ("KERNEL32.DLL", "GetCurrentThread"),
+                ("KERNEL32.DLL", "GetCurrentThreadId"),
+                ("KERNEL32.DLL", "SetThreadContext"),
+                ("KERNEL32.DLL", "GetThreadContext"),
+                ("KERNEL32.DLL", "QueueUserAPC"),
+                ("KERNEL32.DLL", "SleepEx"),
+                ("NTDLL.DLL", "RtlNtStatusToDosError"),
             ])?,
             mapping: _SwAllocStatic(&[
-                ("KERNEL32.DLL",   "CreateFileMappingW"),
+                ("KERNEL32.DLL", "CreateFileMappingW"),
                 ("KERNELBASE.DLL", "MapViewOfFile"),
                 ("KERNELBASE.DLL", "UnmapViewOfFile"),
-                ("KERNEL32.DLL",   "FlushViewOfFile"),
-                ("KERNEL32.DLL",   "CreateFileW"),
-                ("KERNEL32.DLL",   "ReadFile"),
-                ("KERNEL32.DLL",   "WriteFile"),
-                ("KERNEL32.DLL",   "CloseHandle"),
+                ("KERNEL32.DLL", "FlushViewOfFile"),
+                ("KERNEL32.DLL", "CreateFileW"),
+                ("KERNEL32.DLL", "ReadFile"),
+                ("KERNEL32.DLL", "WriteFile"),
+                ("KERNEL32.DLL", "CloseHandle"),
                 ("KERNELBASE.DLL", "GetFileSize"),
-                ("KERNEL32.DLL",   "SetFilePointerEx"),
+                ("KERNEL32.DLL", "SetFilePointerEx"),
             ])?,
         })
     })?;
@@ -164,14 +158,12 @@ unsafe fn _SwGetPage(profile: Profile) -> Option<StackBase> {
 /// # Returns
 /// A pointer (`usize`) to the base of the fake stack (SP value).
 pub fn AbStackWinder(nt_name: &str, stub: *mut u8) -> Option<usize> {
-
     let profile = match nt_name {
-        n if n.starts_with("NtOpenProcess")
-            || n.starts_with("NtTerminateProcess") => Profile::Process,
-        n if n.starts_with("NtCreateThread")
-            || n.starts_with("NtSuspendThread")   => Profile::Thread,
-        n if n.starts_with("NtMapView")
-            || n.starts_with("NtUnmapView")       => Profile::Mapping,
+        n if n.starts_with("NtOpenProcess") || n.starts_with("NtTerminateProcess") => {
+            Profile::Process
+        }
+        n if n.starts_with("NtCreateThread") || n.starts_with("NtSuspendThread") => Profile::Thread,
+        n if n.starts_with("NtMapView") || n.starts_with("NtUnmapView") => Profile::Mapping,
         _ => Profile::Memory,
     };
 
@@ -179,15 +171,14 @@ pub fn AbStackWinder(nt_name: &str, stub: *mut u8) -> Option<usize> {
 
     let tbl = PROFILES.get()?;
     let frames: &[u64] = match profile {
-        Profile::Memory  => tbl.memory,
+        Profile::Memory => tbl.memory,
         Profile::Process => tbl.process,
-        Profile::Thread  => tbl.thread,
+        Profile::Thread => tbl.thread,
         Profile::Mapping => tbl.mapping,
     };
 
     let base = unsafe { _SwGetPage(profile)? };
-    let mut sp =
-        unsafe { ((base.add(SW_STACK_SIZE / 8) as usize) & !0xF) as *mut u64 };
+    let mut sp = unsafe { ((base.add(SW_STACK_SIZE / 8) as usize) & !0xF) as *mut u64 };
 
     unsafe {
         sp = sp.offset(-1);
@@ -206,10 +197,7 @@ pub fn AbStackWinder(nt_name: &str, stub: *mut u8) -> Option<usize> {
 ///
 /// # Safety
 /// Assumes all input DLLs are loaded and valid PE format.
-unsafe fn _SwAllocStatic(
-    pairs: &[(&str, &str)],
-) -> Result<&'static [u64], &'static str> {
-
+unsafe fn _SwAllocStatic(pairs: &[(&str, &str)]) -> Result<&'static [u64], &'static str> {
     let mut v = Vec::with_capacity(pairs.len());
     for &(m, e) in pairs {
         v.push(_SwResExp(m, e)?);
@@ -230,11 +218,7 @@ unsafe fn _SwAllocStatic(
 ///
 /// # Returns
 /// Absolute address of the export as `u64`, or error.
-unsafe fn _SwResExp(
-    module: &str,
-    export: &str,
-) -> Result<u64, &'static str> {
-
+unsafe fn _SwResExp(module: &str, export: &str) -> Result<u64, &'static str> {
     let mod_name = cstr(module);
 
     let hmod = GetModuleHandleA(PCSTR(mod_name.as_ptr() as *const u8))
@@ -246,15 +230,13 @@ unsafe fn _SwResExp(
         return Err("Bad DOS header");
     }
 
-    let nt =
-        &*((base + dos.e_lfanew as usize) as *const IMAGE_NT_HEADERS64);
+    let nt = &*((base + dos.e_lfanew as usize) as *const IMAGE_NT_HEADERS64);
     if nt.Signature != 0x0000_4550 {
         return Err("Bad NT header");
     }
 
-    let dir = nt.OptionalHeader.DataDirectory
-        [IMAGE_DIRECTORY_ENTRY_EXPORT.0 as usize]
-        .VirtualAddress;
+    let dir =
+        nt.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT.0 as usize].VirtualAddress;
     if dir == 0 {
         return Err("No export dir");
     }
@@ -263,7 +245,7 @@ unsafe fn _SwResExp(
         &*((base + dir as usize) as *const IMAGE_EXPORT_DIRECTORY);
     let names = base + exp.AddressOfNames as usize;
     let funcs = base + exp.AddressOfFunctions as usize;
-    let ords  = base + exp.AddressOfNameOrdinals as usize;
+    let ords = base + exp.AddressOfNameOrdinals as usize;
 
     for i in 0..exp.NumberOfNames {
         let name_rva =

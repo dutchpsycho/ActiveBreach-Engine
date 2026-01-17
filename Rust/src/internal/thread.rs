@@ -6,23 +6,16 @@
 
 use std::ptr::null_mut;
 
+use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Foundation::{HANDLE, NTSTATUS};
 use windows::Win32::System::Memory::{
-    VirtualAlloc,
-    VirtualProtect,
-    VirtualFree,
-    MEM_COMMIT,
-    MEM_RESERVE,
-    MEM_RELEASE,
-    PAGE_EXECUTE_READ,
-    PAGE_EXECUTE_READWRITE,
-    PAGE_NOACCESS,
+    VirtualAlloc, VirtualFree, VirtualProtect, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
+    PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_NOACCESS,
 };
-use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Threading::GetCurrentProcess;
 
-use crate::internal::{dispatch, exports, mapper};
 use crate::internal::diagnostics::*;
+use crate::internal::{dispatch, exports, mapper};
 
 /// Offset of StackBase in the Thread Environment Block (TEB).
 const OFFSET_TEB_STACK_BASE: usize = 0x08;
@@ -51,41 +44,39 @@ const OFFSET_TEB_START_ADDR: usize = 0x1720;
 /// - Stub creation fails.
 /// - The syscall itself returns a non-zero status.
 pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
-
     let mut mapped_size = 0;
-    let (mapped_base, _) = mapper::buffer(&mut mapped_size)
-        .ok_or_else(|| ABErr(ABError::ThreadFilemapFail))?;
+    let (mapped_base, _) =
+        mapper::buffer(&mut mapped_size).ok_or_else(|| ABErr(ABError::ThreadFilemapFail))?;
 
     if exports::ExSyscalls(mapped_base, mapped_size).is_err() {
         return Err(ABErr(ABError::ThreadSyscallInitFail));
     }
 
-    let table = exports::get_syscall_table()
-        .ok_or_else(|| ABErr(ABError::ThreadSyscallTableMiss))?;
+    let table =
+        exports::get_syscall_table().ok_or_else(|| ABErr(ABError::ThreadSyscallTableMiss))?;
 
     let ssn = *table
         .get("NtCreateThreadEx")
         .ok_or_else(|| ABErr(ABError::ThreadNtCreateMissing))?;
 
-    let stub_ptr = VirtualAlloc(
-        None,
-        0x20,
-        MEM_COMMIT | MEM_RESERVE,
-        PAGE_EXECUTE_READWRITE,
-    ) as *mut u8;
+    let stub_ptr =
+        VirtualAlloc(None, 0x20, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) as *mut u8;
 
     if stub_ptr.is_null() {
         return Err(ABErr(ABError::ThreadStubAllocFail));
     }
 
     let tmpl: [u8; 11] = [
-        0x4C, 0x8B, 0xD1,
+        0x4C,
+        0x8B,
+        0xD1,
         0xB8,
         (ssn & 0xFF) as u8,
         ((ssn >> 8) & 0xFF) as u8,
         ((ssn >> 16) & 0xFF) as u8,
         ((ssn >> 24) & 0xFF) as u8,
-        0x0F, 0x05,
+        0x0F,
+        0x05,
         0xC3,
     ];
     std::ptr::copy_nonoverlapping(tmpl.as_ptr(), stub_ptr, tmpl.len());
@@ -160,38 +151,39 @@ pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
 /// - `None` if `VirtualAlloc` fails.
 pub unsafe fn direct_syscall_stub(
     ssn: u32,
-) -> Option<unsafe extern "system" fn(
-    *mut HANDLE,
-    u32,
-    *mut u8,
-    HANDLE,
-    *mut u8,
-    *mut u8,
-    u32,
-    usize,
-    usize,
-    usize,
-    *mut u8,
-) -> NTSTATUS> {
-    let stub = VirtualAlloc(
-        None,
-        0x20,
-        MEM_COMMIT | MEM_RESERVE,
-        PAGE_EXECUTE_READWRITE,
-    ) as *mut u8;
+) -> Option<
+    unsafe extern "system" fn(
+        *mut HANDLE,
+        u32,
+        *mut u8,
+        HANDLE,
+        *mut u8,
+        *mut u8,
+        u32,
+        usize,
+        usize,
+        usize,
+        *mut u8,
+    ) -> NTSTATUS,
+> {
+    let stub =
+        VirtualAlloc(None, 0x20, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) as *mut u8;
 
     if stub.is_null() {
         return None;
     }
 
     let tmpl: [u8; 11] = [
-        0x4C, 0x8B, 0xD1,
+        0x4C,
+        0x8B,
+        0xD1,
         0xB8,
         (ssn & 0xFF) as u8,
         ((ssn >> 8) & 0xFF) as u8,
         ((ssn >> 16) & 0xFF) as u8,
         ((ssn >> 24) & 0xFF) as u8,
-        0x0F, 0x05,
+        0x0F,
+        0x05,
         0xC3,
     ];
 

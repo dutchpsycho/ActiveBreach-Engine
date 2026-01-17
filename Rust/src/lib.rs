@@ -42,12 +42,12 @@
 #![allow(unused_imports)]
 #![allow(static_mut_refs)]
 #![allow(non_upper_case_globals)]
- 
+
 pub mod internal;
 
 use core::ffi::c_void;
 use crate::internal::diagnostics::*;
-use crate::internal::dispatch::{__ActiveBreachFire, G_READY, G_OPFRAME};
+use crate::internal::dispatch::{__ActiveBreachFire, G_OPFRAME, G_READY};
 use crate::internal::exports::SYSCALL_TABLE;
 
 use windows::Win32::System::Threading::{WaitOnAddress, WakeByAddressSingle, INFINITE};

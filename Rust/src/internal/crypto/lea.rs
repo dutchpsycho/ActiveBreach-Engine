@@ -20,14 +20,17 @@
 //! - Callers must guarantee alignment and valid memory
 
 #![allow(non_camel_case_types)]
-#![cfg_attr(not(any(target_arch = "x86", target_arch = "x86_64")), allow(dead_code))]
+#![cfg_attr(
+    not(any(target_arch = "x86", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 
 use core::convert::TryInto;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
-use std::is_x86_feature_detected;
 use std::ffi::CString;
+use std::is_x86_feature_detected;
 
 /// Number of encryption rounds (fewer = faster, weaker).
 const ROUNDS: usize = 12;
@@ -118,10 +121,18 @@ impl LEA128 {
 
         for r in (0..ROUNDS).rev() {
             let base = r * 4;
-            x[3] = (x[3] ^ x[0]).rotate_right(11).wrapping_sub(self.round_keys[base + 3]);
-            x[2] = (x[2] ^ x[3]).rotate_right(7).wrapping_sub(self.round_keys[base + 2]);
-            x[1] = (x[1] ^ x[2]).rotate_right(5).wrapping_sub(self.round_keys[base + 1]);
-            x[0] = (x[0] ^ x[1]).rotate_right(3).wrapping_sub(self.round_keys[base + 0]);
+            x[3] = (x[3] ^ x[0])
+                .rotate_right(11)
+                .wrapping_sub(self.round_keys[base + 3]);
+            x[2] = (x[2] ^ x[3])
+                .rotate_right(7)
+                .wrapping_sub(self.round_keys[base + 2]);
+            x[1] = (x[1] ^ x[2])
+                .rotate_right(5)
+                .wrapping_sub(self.round_keys[base + 1]);
+            x[0] = (x[0] ^ x[1])
+                .rotate_right(3)
+                .wrapping_sub(self.round_keys[base + 0]);
         }
 
         for i in 0..4 {
