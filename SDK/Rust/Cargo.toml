@@ -2,27 +2,32 @@
 name = "activebreach"
 version = "0.1.0"
 edition = "2021"
-license = "“Commons Clause” License Condition v1.0 | Apache License"
-repository = "https://github.com/DutchPsycho/ActiveBreach-Engine"
-description = "Syscall abstraction layer via dynamic syscall proxying with dispatcher coordination"
+authors = ["TITAN Softwork Solutions"]
+repository = "https://github.com/dutchpsycho/ActiveBreach-Engine"
+homepage = "https://github.com/dutchpsycho/ActiveBreach-Engine"
 readme = "README.md"
+license-file = "LICENSE"
+description = "Windows syscall abstraction layer via dynamic syscall proxying with dispatcher coordination"
 keywords = ["syscall", "proxy", "ntdll", "EDR", "ActiveBreach"]
-categories = ["os::windows-apis", "no-std"]
+categories = ["os::windows-apis"]
+
+publish = false
+
 exclude = ["test/*", "target/*", ".vscode", "*.dll", "*.lib"]
 
 [dependencies]
-once_cell = "1.21.1"
-rustc-hash = "2.1.1"
+once_cell = "1"
+rustc-hash = "2"
 
-windows = { version = "0.62.2", features = [
-    "Win32_Foundation",
-    "Win32_System_Threading",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Memory",
-    "Win32_Storage_FileSystem",
-    "Win32_System_Diagnostics_Debug",
-    "Win32_System_SystemServices",
-    "Win32_System_SystemInformation",
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_SystemServices",
+  "Win32_System_SystemInformation",
 ] }
 
 [lib]
@@ -52,4 +57,4 @@ lto = "fat"
 panic = "abort"
 incremental = false
 codegen-units = 1
-strip = true
+strip = "symbols"
