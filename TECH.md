@@ -1,130 +1,155 @@
-### What is a Hook, and Why Bypass It?
+# TECH.md
 
-On Windows, user applications interact with the OS through two main API layers:
+## Core Techniques Used
 
-- **WinAPI** (e.g. `CreateFile` from `kernel32.dll`)
-- **NtAPI** (e.g. `NtCreateFile` from `ntdll.dll`)
+1. **Clean ntdll mapping + dynamic SSN extraction**  
+2. **Encrypted ring-buffer of syscall stubs** (LEA cipher, hardware-derived key)  
+3. **Per-call decryption / SSN patching / re-encryption**  
+4. **Stack spoofing (Sidewinder)** – fake realistic call stacks  
+5. **Usermode-only dispatcher thread** (no kernel objects for sync)  
+6. **Hidden dispatcher thread creation** (direct NtCreateThreadEx)  
+7. **No WinAPI usage in hot paths** (avoids hooks)  
+8. **Runtime-only memory** – nothing persistent for static analysis
 
-The WinAPI is just a wrapper. It calls into the NtAPI, which issues a syscall to the kernel. For example:
+These are layered so that even if one layer is defeated, others still protect.
 
-```text
-CreateFile (kernel32.dll)
- → NtCreateFile (ntdll.dll)
-   → syscall → Kernel
-   → NTSTATUS returned
-```
+## Why These Techniques Are Effective (and How Windows Actually Works)
 
----
+### 1. How Windows Syscalls Really Work (Beginner Explanation)
 
-### How Syscalls Work
+- Every Windows process has `ntdll.dll` loaded.  
+- Inside ntdll are functions like `NtCreateFile`, `NtOpenProcess`, etc.  
+- These functions are tiny stubs:  
 
-Modern Windows builds (21H2+ → 22H2 and onwards into 2025) introduced changes in the syscall prologue. These changes were designed to support mitigation mechanisms like:
+  ```asm
+  mov r10, rcx      ; move first arg to r10 (calling convention)
+  mov eax, 0xXX     ; SSN = System Service Number (unique per syscall, changes per Windows build)
+  syscall           ; enter kernel
+  ret
+  ```
 
-- **HVCI (Hypervisor-protected Code Integrity)**
-- **CFG/XFG (Control-flow Enforcement)**
-- **Dynamic syscall fallback toggling**
+- The kernel looks at EAX (SSN) to decide which internal function to run.  
+- EDR tools hook these ntdll stubs or monitor the syscall instruction to see what the process is doing.
 
-This added a runtime check before the syscall instruction, to conditionally bypass fast syscalls if disabled.
+**Direct syscalls** = manually build the same stub with the correct SSN -> bypasses ntdll hooks.  
+But EDR evolved: they now check:
 
-Clean `NtOpenProcess` syscall stub:
+- Is the call coming from ntdll code section?  
+- Does the call stack look like normal API calls (kernel32 -> ntdll)?  
+- Is there a fresh RWX page with a syscall stub?  
+- Is the stub encrypted or behaving strangely?
 
-```asm
-NtOpenProcess:
-    mov     r10, rcx                     ; standard syscall prelude
-    mov     eax, 0x26                    ; syscall number (NtOpenProcess) AKA Syscall Service Number 
-    test    byte ptr ds:[7FFE0308], 1    ; check syscall fallback bit (KUSER_SHARED_DATA)
-    jnz     fallback                     ; if set, take alternative path
-    syscall
-    ret
-```
+ActiveBreach defeats all of these.
 
-The key addition is the test against `KUSER_SHARED_DATA + 0x308`, which Microsoft uses to control syscall mode dynamically at runtime. This check is *not* present in older syscall stubs (pre-20H2).
+### 2. Clean ntdll Mapping + Dynamic SSN Extraction
 
----
+Why?  
+SSNs change between Windows versions/builds. Hardcoding them breaks on updates.
 
-### What Does a Hook Look Like?
+How it works:
 
-EDRs and Anti-Cheats commonly hook `ntdll.dll` exports by modifying the start of a syscall stub. But instead of overwriting the entire function, most modern implementations inject a **trampoline** via `call` that routes execution into their monitoring logic before falling through to the original stub.
+- On launch, ActiveBreach opens and memory-maps a fresh copy of `ntdll.dll` from `C:\Windows\System32\ntdll.dll`.  
+- It parses the export table, finds every `Nt*`/`Zw*` function.  
+- For each, it reads the first few bytes to extract the `mov eax, SSN` value.  
+- Stores SSN in a hashmap (`FxHashMap<String, u32>`).
 
-This lets them inspect syscall arguments or context **before** the syscall executes, without relocating or duplicating the full function.
+Effect:
 
-Example: Hooked `NtOpenProcess` (trampoline-style):
+- No reliance on the already-loaded (possibly hooked) ntdll.  
+- Works on any Windows build without updating the binary.
 
-```asm
-NtOpenProcess:
-    call    0xWinDefender                ; call into EDR's syscall monitor
-    mov     r10, rcx                     ; legit prologue starts here
-    mov     eax, 0x26
-    test    byte ptr ds:[7FFE0308], 1
-    jnz     fallback
-    syscall
-    ret
-```
+### 3. Encrypted Ring-Buffer of Stubs (LEA Cipher)
 
-The injected `call` pushes a return address and jumps to the EDR’s logic. After logging, it returns execution back to the original stub, allowing the syscall to continue as normal.
+Why encrypt?
 
-This style is less destructive and more stealthy than fully overwriting with a `jmp`, and it survives better across Windows updates.
+- Fresh RWX pages with syscall stubs are a huge red flag.  
+- Static analysis (YARA) looks for the exact byte pattern of syscall stubs.
 
----
+How it works:
 
-### How Hooks Work
+- Preallocates 32 stubs (32 bytes each, 16-byte aligned).  
+- Each stub starts as the template:
 
-When your process calls something like `NtOpenProcess`:
+  ```asm
+  mov r10, rcx
+  mov eax, 0x00000000   ; placeholder SSN
+  syscall
+  ret
+  ```
 
-1. It loads the function from `ntdll.dll`
-2. If hooked, the function starts with a `call` to the EDR
-3. The EDR inspects or logs the syscall, then returns to the stub
-4. The syscall instruction is then issued normally
+- Immediately encrypts the entire stub with a lightweight LEA variant (12 rounds, not full crypto strength – speed > security).  
+- Key derived at runtime from CPUID + RDTSC -> unique per process run.  
+- Stubs are protected `PAGE_NOACCESS` when encrypted.
 
-This entire process happens **before** the syscall instruction is reached, so even if your syscall goes through, your behavior was already seen.
+When a syscall is needed:
 
----
+- Acquire a slot from the ring -> change protection -> decrypt -> patch correct SSN -> mark executable -> use.
 
-### Bypassing Hooks via Direct Syscalls
+After use:
 
-You can avoid these hooks by skipping `ntdll.dll` completely:
+- Zero memory -> rewrite template -> re-encrypt -> back to `PAGE_NOACCESS`.
 
-1. Locate the **syscall number (SSN)** for the function you want
-2. Generate your own syscall stub in memory
-3. Issue the syscall directly from your code
+Effect:
 
-By doing this, you never enter the hooked usermode export, so redirections don’t trigger.
+- At rest: memory contains only encrypted blobs -> evades memory scans.  
+- Only briefly decrypted/executable during actual syscall.  
+- Ring reuse -> no constant allocation of new RWX pages.
 
-Example flow:
+### 4. Stack Spoofing (Sidewinder)
 
-```text
-YourStub → syscall → Kernel
-```
+Why?
+Modern EDR checks the call stack during syscall. A direct stub has a stack that looks wrong (no kernel32/kernelbase frames).
 
-This bypasses any EDR/AntiCheat logic that relies on hooking DLL exports.
+How Sidewinder works:
 
----
+- Pre-resolves real addresses of common benign functions (e.g., `VirtualAlloc`, `OpenProcess`, `CreateFileW`, etc.) from legitimate DLLs.  
+- Groups them into profiles (Memory, Process, Thread, Mapping).  
+- Per thread, allocates a private fake stack page.  
+- When building a syscall, it constructs a fake stack with realistic return addresses matching the syscall type.
 
-### Stub Structure Example
+Effect:
 
-The modern syscall stub used in `ntdll.dll` includes fallback logic:
+- Kernel/EDR sees a call stack that looks like legitimate API usage -> blends in perfectly.
 
-```asm
-mov     r10, rcx
-mov     eax, <syscall_id>
-test    byte ptr ds:[0x7FFE0308], 1
-jnz     fallback
-syscall
-ret
-```
+### 5. Usermode-Only Dispatcher Thread
 
-We don't need the KUSER bit-check, we can use a minimal prologue that skips it (What ActiveBreach uses)
+Why?
+Directly issuing syscalls from the caller thread can leak context or be traced.
 
-```asm
-mov     r10, rcx
-mov     eax, <syscall_id>
-syscall
-ret
-```
+How it works:
 
----
+- On launch, uses a fresh direct syscall to call `NtCreateThreadEx` and spawn a hidden dispatcher thread.  
+- Caller queues requests into a shared `ABOpFrame` (pure usermode structure).  
+- Dispatcher thread pulls request -> acquires stub -> patches SSN -> sets up spoofed stack -> executes syscall -> returns result.  
+- Synchronization uses `WaitOnAddress` / `WakeByAddressSingle` (usermode atomic wait/wake, no kernel events).
 
-### Limitations
+Effect:
 
-- This will **not bypass kernel-mode hooks** (like SSDT patching or callbacks), but those are rare in modern commercial EDRs due to PatchGuard.
-- Syscall bypasses only defeat usermode hooks. Kernel callbacks, SSDT modifications, or hypervisor-layer inspection still see your behavior.
+- Caller thread never directly executes the syscall instruction.  
+- No kernel synchronization objects -> harder to trace.
+
+### 6. Overall Stealth Properties
+
+- No WinAPI calls in evasion-critical paths (everything uses direct syscalls or manual memory work).  
+- No persistent RWX regions.  
+- No cleartext syscall stubs in memory.  
+- Realistic call stacks.  
+- Dynamic SSN resolution.  
+- Minimal, encrypted, rotating footprint.
+
+## Why Is This Considered Advanced?
+
+Most public direct-syscall projects do one or two of these things.  
+ActiveBreach combines **all major modern evasion vectors** into a single coherent framework:
+
+| Detection Method              | Typical Direct Syscall | ActiveBreach Defense                              |
+|-------------------------------|------------------------|---------------------------------------------------|
+| ntdll hooks                   | Bypassed               | Bypassed (clean map + own stubs)                  |
+| Fresh RWX pages               | Detected               | Encrypted ring, brief decryption                  |
+| Static stub signatures        | Detected               | Encrypted at rest                                 |
+| Suspicious call stack         | Detected               | Sidewinder spoofing                               |
+| Direct syscall from caller    | Detected (context)     | Separate dispatcher thread                        |
+| Hardcoded SSNs                | Breaks on update       | Runtime extraction                                |
+| Timing / long execution       | Possible detection     | Fast LEA, minimal work                            |
+
+This layered approach makes it significantly harder for current-generation EDR to reliably flag the activity without high false positives.
