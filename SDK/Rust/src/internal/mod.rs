@@ -1,5 +1,6 @@
 pub mod crypto;
 
+pub mod antibreach;
 pub mod diagnostics;
 pub mod dispatch;
 pub mod exports;

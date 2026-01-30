@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use windows::Win32::System::Memory::{VirtualProtect, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE};
 
+use crate::internal::antibreach;
 use crate::internal::diagnostics::{ABErr, ABError};
 use crate::internal::exports::SYSCALL_TABLE;
 use crate::internal::stack::{AbStackWinder, SidewinderInit};
@@ -159,6 +160,8 @@ pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
 
         let mut regs = [0usize; 16];
         regs[..frame.arg_count].copy_from_slice(&frame.args[..frame.arg_count]);
+
+        antibreach::evaluate();
 
         let ret = fn_ptr(
             regs[0], regs[1], regs[2], regs[3], regs[4], regs[5], regs[6], regs[7], regs[8],

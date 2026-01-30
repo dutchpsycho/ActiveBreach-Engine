@@ -45,6 +45,8 @@
 
 pub mod internal;
 
+pub use internal::antibreach::{ViolationHandler, ViolationType};
+
 use core::ffi::c_void;
 use crate::internal::diagnostics::*;
 use crate::internal::dispatch::{__ActiveBreachFire, G_OPFRAME, G_READY};
@@ -55,6 +57,21 @@ use windows::Win32::System::Threading::{WaitOnAddress, WakeByAddressSingle, INFI
 type BOOL = i32;
 
 use std::ptr;
+
+/// Returns the number of AntiBreach-style violations detected by the Rust dispatcher.
+pub fn ab_violation_count() -> u32 {
+    internal::antibreach::violation_count()
+}
+
+/// Registers a global violation handler that will be invoked on each violation.
+pub fn ab_set_violation_handler(handler: ViolationHandler) {
+    internal::antibreach::register_violation_handler(handler);
+}
+
+/// Clears the currently registered violation handler.
+pub fn ab_clear_violation_handler() {
+    internal::antibreach::clear_violation_handler();
+}
 
 /// Launches the ActiveBreach syscall dispatcher thread and loads the syscall table.
 ///
