@@ -1,65 +1,91 @@
-## ActiveBreach Engine
+# ActiveBreach Engine (ABE)
 
-ABE is a successor to SysWhispers & Hells Gate. It takes the concepts used and turns it into a fully dynamic framework.
+[![Version](https://img.shields.io/badge/Version-2025-blue)](#)
+[![Language](https://img.shields.io/badge/Language-Rust%20%7C%20C%2B%2B%20%7C%20C-orange)](#)
 
-Originally inspired by a blogpost by [MDSEC](https://www.mdsec.co.uk/2020/12/bypassing-user-mode-hooks-and-direct-invocation-of-system-calls-for-red-teams/).
+**ActiveBreach** is a fully dynamic direct syscall framework for Windows 10/11 x64, designed as a modern successor to tools like SysWhispers and Hell's Gate.
 
----
+Inspired by [MDSEC's research on bypassing user-mode hooks](https://www.mdsec.co.uk/2020/12/bypassing-user-mode-hooks-and-direct-invocation-of-system-calls-for-red-teams/).
 
-### What does ActiveBreach do differently?
+ABE addresses key detection vectors that affect traditional syscall stubs:
 
-Common syscall frameworks like **SysWhispers** and **HellsGate** provide static wrappers or inject precompiled stubs to provide direct system call execution. While effective, these approaches leave much room for improvement and do not address critical security vulnerabilites and detection mechanisms that can be used to detect such methods.
+- Static `syscall` patterns and RWX regions
+- Suspicious call stacks and non-backed execution
+- Hooked API usage during SSN resolution
+- String and import heuristics
 
-Several limitations are common across these tools:
+The **Rust implementation** is the most advanced, featuring JIT memory encryption, full stringless design, and rotating encrypted stubs.
 
-* Binaries containing ``syscall`` instructions or ABI's are a very clear heuristic detection
-* Processes running with RWX/WCX/WX/X regions containing ``syscall`` ABI are obvious to common AV/EDR YARA scans (C/C++ ABE does not fix this, Rust does)
-* Syscalls executed from non-system threads raise suspicion
-* Syscalls executed from non-image-backed RWX/WCX/WX/X regions raise suspicion
-* ``ntdll.dll`` or ``Nt*Api`` strings present in a binary raises heuristics
-* Recursive GetProcAddr raises heuristics
-* Mapping in-memory ``ntdll.dll`` indirectly calls AV/EDR hooks and triggers heuristics
-* LoadLibrary *(Especially ``ntdll.dll``)* raises heuristics
+## Feature Comparison
 
----
+| Feature                        | C          | C++                  | Rust (Recommended)          |
+|-------------------------------|------------|----------------------|-----------------------------|
+| Dynamic SSN extraction        | Yes        | Yes                  | Yes                         |
+| Clean ntdll mapping           | Yes        | Yes                  | Yes                         |
+| Encrypted rotating stubs      | No         | No                   | Yes (LEA-based, runtime key)|
+| Stack spoofing                | Basic      | Yes                  | Yes (Sidewinder profiles)   |
+| Usermode-only dispatch        | Yes        | Yes                  | Yes                         |
+| Anti-tamper / debugging       | No         | Yes (optional)       | No                          |
+| Stringless binary             | Partial    | Partial              | Full                        |
+| Footprint                     | Smallest   | Medium               | Largest                     |
+| YARA / memory scan resistance | Low        | Medium               | Highest                     |
 
-### How ActiveBreach Works
+## How It Works
 
-ABE works around *most* of these constraints, with the rust version offering the most advanced implementation.
+ABE extracts SSNs at runtime from a privately mapped clean `ntdll.dll`, builds minimal stubs, and executes syscalls via a dedicated dispatcher thread.
 
-For an in-depth look at the techniques used by ABE, I encourage you to look at the code to see for yourself.
+Key evasion techniques (Rust version):
 
-Diagrams to visualize ABE's flow and detection prevention mechanisms;
+- Stubs are encrypted at rest with a hardware-derived LEA variant
+- Ring-buffer rotation + in-place decrypt/encrypt
+- Per-category stack spoofing for realistic return chains
+- No kernel sync objects for queuing (usermode `WaitOnAddress`/`WakeByAddress`)
+- Zero reliance on hooked Windows APIs
 
-![ActiveBreach Hooking Diagram](./Diagram/AB.png)
+### Visual Overview
 
-![ActiveBreach Memory Scanning Diagram](./Diagram/AB_DYNAMIC.png) ![ActiveBreach String-Byte Scanning Diagram](./Diagram/AB_STATIC.png)
+- **Hooking Bypass**: ![Hooking Diagram](./Diagram/AB.png)
+- **Dynamic Memory Evasion**: ![Dynamic Memory Diagram](./Diagram/AB_DYNAMIC.png)
+- **Static Analysis Evasion**: ![Static Scanning Diagram](./Diagram/AB_STATIC.png)
 
----
-
-### Versions
-
-There's 3 versions of ABE, select based on what you're looking for.
-
-* C - Minimal basic implementation, small footprint
-* C++ - Larger footprint, uses C++ 17/20, includes Anti-Tamper & Debugging
-* Rust - Largest, most advanced, includes JIT-memory-encryption & is truly stringless
-
-These helpers are also introduced on the C++ version;
-
-* **Anti-Tamper instrumentation**, which validates thread state, PEB/TEB integrity, and call origins
-* **Debugging & symbolic tracing**, optionally enabled via `AB_DEBUG`, allowing runtime inspection of syscall arguments, return values, and violation counters
-
-### Test Coverage
-
-For C & C++, they can be found in the solution *(.sln)*.
-
-For Rust, it can be found in ``/tests/``
+For a deep dive, read the source; the techniques are heavily commented.
 
 ## Usage
-See [USAGE.md](USAGE.md) for full setup & examples in **C, C++ & Rust**.
 
----
+See [USAGE.md](USAGE.md) for:
+
+- Build instructions (MSVC toolchains, Windows 10/11 x64 AMD)
+- Integration examples in C, C++, and Rust
+- Test suite execution
+
+## Testing
+
+- **C / C++**: Visual Studio solution (`.sln`) with test projects
+- **Rust**: `cargo test` in `/tests/`
 
 ## Disclaimer
-This tool is for educational and research use only. Use at your own risk. You are solely responsible for how you use this code.
+
+This tool is provided for **educational and authorized security research only**.  
+Unauthorized use may violate laws. The authors and contributors assume no liability.
+
+## License
+
+Copyright © 2025 TITAN Softwork Solutions
+
+Licensed under the Apache License, Version 2.0 (the "License") **with the Commons Clause License Condition v1.0**.
+
+- You may not use this software for commercial purposes ("Sell the Software" as defined in the Commons Clause).
+- Full text is provided in `LICENSE`.
+
+Apache 2.0: <http://www.apache.org/licenses/LICENSE-2.0>  
+Commons Clause details: <https://commonsclause.com/>
+
+## Contributing
+
+Pull requests welcome. Focus areas:
+
+- New evasion techniques
+- Additional syscall coverage
+- Performance improvements (especially Rust stub ring)
+
+Please document changes clearly and retain the required license notices.
