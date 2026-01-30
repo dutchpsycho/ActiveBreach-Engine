@@ -4,9 +4,6 @@
 - `README.md`, `TECH.md`, `USAGE.md`
 - `E900U.yar` (root YARA rule)
 - `Diagram/` (PNG architecture diagrams)
-- `Example/`
-  - `minimal/` (standalone C++ example with local `include/ActiveBreach.hpp/.cpp`)
-  - `using_activebreach.md` (currently empty)
 - `SDK/`
   - `C/` (C implementation + `C.sln` + `C Tests`)
   - `C++/` (C++ implementation + `C++.sln` + `C++ Tests`)
