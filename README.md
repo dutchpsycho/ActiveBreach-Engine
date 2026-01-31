@@ -1,5 +1,6 @@
 # ActiveBreach Engine (ABE)
 
+[![Discord](https://img.shields.io/discord/1240608336005828668?label=TITAN%20Softworks&logo=discord&color=5865F2&style=flat)](https://discord.gg/yUWyvT9JyP)
 [![Version](https://img.shields.io/badge/Version-2025-blue)](#)
 [![Language](https://img.shields.io/badge/Language-Rust%20%7C%20C%2B%2B%20%7C%20C-orange)](#)
 
