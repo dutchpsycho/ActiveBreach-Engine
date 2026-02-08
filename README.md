@@ -1,77 +1,55 @@
-# ActiveBreach Engine (ABE)
+# ACTIVEBREACH-ENGINE (ABE)
 
 [![Discord](https://img.shields.io/discord/1240608336005828668?label=TITAN%20Softworks&logo=discord&color=5865F2&style=flat)](https://discord.gg/yUWyvT9JyP)
-[![Version](https://img.shields.io/badge/Version-2025-blue)](#)
-[![Language](https://img.shields.io/badge/Language-Rust%20%7C%20C%2B%2B%20%7C%20C-orange)](#)
+![C](https://img.shields.io/badge/C-00599C?logo=c&logoColor=white&style=flat)
+![C++](https://img.shields.io/badge/C%2B%2B-00599C?logo=c%2B%2B&logoColor=white&style=flat)
+![Rust](https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white&style=flat)
 
-**ActiveBreach** is a fully dynamic direct syscall framework for Windows 10/11 x64, designed as a modern successor to tools like SysWhispers and Hell's Gate.
+**ActiveBreach-Engine (ABE)** is a Windows execution capability platform designed to support authorized adversary emulation, detection validation, and low-level security research in modern EDR-protected environments.
 
-Inspired by [MDSEC's research on bypassing user-mode hooks](https://www.mdsec.co.uk/2020/12/bypassing-user-mode-hooks-and-direct-invocation-of-system-calls-for-red-teams/).
+**ABE** provides a controlled, fully dynamic mechanism for executing Windows system calls without reliance on user-mode API invocation or resident `ntdll.dll` code paths, enabling security teams to evaluate detection coverage, telemetry fidelity, and behavioral assumptions made by modern EDR, XDR, and security monitoring solutions.
 
-ABE addresses key detection vectors that affect traditional syscall stubs:
+This project is architected as a successor-class capability to historical syscall research tooling (e.g., SysWhispers and Hell’s Gate), addressing the limitations, static assumptions, and detectability issues inherent in earlier designs.
 
-- Static `syscall` patterns and RWX regions
-- Suspicious call stacks and non-backed execution
-- Hooked API usage during SSN resolution
-- String and import heuristics
+## SCOPE
 
-The **Rust implementation** is the most advanced, featuring JIT memory encryption, full stringless design, and rotating encrypted stubs.
+Modern defensive products increasingly rely on user-mode instrumentation due to Microsoft locking down the kernel. This instrumentation comes in many forms, such as *API hooking* and *behavioral inference*, to detect malicious activity. While effective, these approaches introduce blind spots at the user-to-kernel boundary.
 
-## Feature Comparison
+**ABE** targets what defensive products cannot control: the system itself. A common approach is for products to set *API hooks* on `Nt*` functions, which are exported by `ntdll.dll` and contain the `syscall` instruction. The `syscall` instruction is important for two reasons:
 
-| Feature                        | C          | C++                  | Rust (Recommended)          |
-|-------------------------------|------------|----------------------|-----------------------------|
-| Dynamic SSN extraction        | Yes        | Yes                  | Yes                         |
-| Clean ntdll mapping           | Yes        | Yes                  | Yes                         |
-| Encrypted rotating stubs      | No         | No                   | Yes (LEA-based, runtime key)|
-| Stack spoofing                | Basic      | Yes                  | Yes (Sidewinder profiles)   |
-| Usermode-only dispatch        | Yes        | Yes                  | Yes                         |
-| Anti-tamper / debugging       | No         | Yes (optional)       | No                          |
-| Stringless binary             | Partial    | Partial              | Full                        |
-| Footprint                     | Smallest   | Medium               | Largest                     |
-| YARA / memory scan resistance | Low        | Medium               | Highest                     |
+1. It is not instrumentable by user-mode products  
+2. It performs a context switch  
 
-## How It Works
+When the CPU executes the `syscall` instruction, it transitions execution into a privileged kernel-mode context. This context switch itself is not directly observable by user-mode defensive products. API hooking, by contrast, relies on redirecting execution prior to the syscall, which executes the defensive product’s instrumentation routine. From an adversary emulation perspective, executing that instrumentation is undesirable.
 
-ABE extracts SSNs at runtime from a privately mapped clean `ntdll.dll`, builds minimal stubs, and executes syscalls via a dedicated dispatcher thread.
+![Hooking Diagram](./Diagram/AB.png)
 
-Key evasion techniques (Rust version):
+This is where **ABE** comes in. **ABE** builds an in-process ring of stubs for each `syscall` instruction provided by `ntdll.dll`, encrypts them, and sets up a specialized dispatcher to decrypt and execute these syscalls. All execution is managed by ABE’s context-controlled dispatcher thread. This results in a controlled execution environment where system calls can be dispatched without user-mode monitoring or external product interference.
 
-- Stubs are encrypted at rest with a hardware-derived LEA variant
-- Ring-buffer rotation + in-place decrypt/encrypt
-- Per-category stack spoofing for realistic return chains
-- No kernel sync objects for queuing (usermode `WaitOnAddress`/`WakeByAddress`)
-- Zero reliance on hooked Windows APIs
+For a full technical outline, see [Technical Overview](./TECH.md)
 
-### Visual Overview
+## DEVELOPMENT
 
-- **Hooking Bypass**: ![Hooking Diagram](./Diagram/AB.png)
-- **Dynamic Memory Evasion**: ![Dynamic Memory Diagram](./Diagram/AB_DYNAMIC.png)
-- **Static Analysis Evasion**: ![Static Scanning Diagram](./Diagram/AB_STATIC.png)
+For ease of integration, **ABE** is provided in three trims: C, C++, and Rust. Rust is the most technically advanced implementation, while C++ offers an integrated debugger.
 
-For a deep dive, read the source; the techniques are heavily commented.
+### Why three versions?
 
-## Usage
+Primarily due to integration complexity. Linking cryptographic libraries and using Windows internal structures in C++ introduces development friction and unnecessary complexity. The goal of **ABE** is ease of integration, which means no external dependencies. As a result, the C and C++ versions are provided as single-include header files (`.h`).
 
-See [USAGE.md](USAGE.md) for:
+The Rust version includes exclusive features such as stub encryption, a custom stub ring allocator, and TLS callbacks.
 
-- Build instructions (MSVC toolchains, Windows 10/11 x64 AMD)
-- Integration examples in C, C++, and Rust
-- Test suite execution
+## USAGE
 
-## Testing
-
-- **C / C++**: Visual Studio solution (`.sln`) with test projects
-- **Rust**: `cargo test` in `/tests/`
+See [Usage Overview](./USAGE.md)
 
 ## Disclaimer
 
 This tool is provided for **educational and authorized security research only**.  
-Unauthorized use may violate laws. The authors and contributors assume no liability.
+Unauthorized use may violate applicable laws. The authors and contributors assume no liability.
 
 ## License
 
-Copyright © 2025 TITAN Softwork Solutions
+Copyright © 2026 TITAN Softwork Solutions
 
 Licensed under the Apache License, Version 2.0 (the "License") **with the Commons Clause License Condition v1.0**.
 
@@ -80,13 +58,3 @@ Licensed under the Apache License, Version 2.0 (the "License") **with the Common
 
 Apache 2.0: <http://www.apache.org/licenses/LICENSE-2.0>  
 Commons Clause details: <https://commonsclause.com/>
-
-## Contributing
-
-Pull requests welcome. Focus areas:
-
-- New evasion techniques
-- Additional syscall coverage
-- Performance improvements (especially Rust stub ring)
-
-Please document changes clearly and retain the required license notices.
