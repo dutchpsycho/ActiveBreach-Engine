@@ -8,3 +8,8 @@ rustflags = [
     "-C", "target-cpu=native",
     "-C", "opt-level=3",
 ]
+
+[alias]
+test-harness-secure = "test --test activebreach_harness"
+test-harness-stealth = "test --no-default-features --features stealth --test activebreach_harness"
+test-harness-both = "test --test activebreach_harness && test --no-default-features --features stealth --test activebreach_harness"    

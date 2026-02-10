@@ -30,7 +30,6 @@
 //! ## Safety
 //! This program uses unsafe NT API calls and raw pointers but is isolated in test context.
 //! All handles are either self handles or ephemeral.
-//!
 
 use std::{
     ptr::null_mut,

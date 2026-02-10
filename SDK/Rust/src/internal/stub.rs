@@ -1,7 +1,7 @@
 //! Manages a ring-buffer of 16-byte-aligned memory stubs, each encoded with runtime encryption
 
 use std::mem::MaybeUninit;
-use std::ptr::{null_mut, write_bytes};
+use std::ptr::write_bytes;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use windows::Win32::System::Memory::{
@@ -11,11 +11,10 @@ use windows::Win32::System::Memory::{
 
 use crate::internal::crypto::lea::{lea_decrypt_block, lea_encrypt_block};
 use crate::internal::diagnostics::*;
+use crate::internal::stub_template::write_syscall_stub;
+pub use crate::internal::stub_template::STUB_SIZE;
 
 use once_cell::sync::Lazy;
-
-/// Size of a syscall stub in bytes.
-pub const STUB_SIZE: usize = 32;
 
 /// Number of encrypted stubs to maintain in the ring pool.
 const NUM_STUBS: usize = 32;
@@ -68,8 +67,11 @@ impl AbRingAllocator {
                 lea_encrypt_block(stub, STUB_SIZE);
 
                 let mut old = PAGE_EXECUTE_READ;
-                let ok = VirtualProtect(stub as _, STUB_SIZE, PAGE_NOACCESS, &mut old).is_ok();
-                debug_assert!(ok);
+                #[cfg(feature = "secure")]
+                {
+                    let ok = VirtualProtect(stub as _, STUB_SIZE, PAGE_NOACCESS, &mut old).is_ok();
+                    debug_assert!(ok);
+                }
             }
 
             slots[i] = MaybeUninit::new(StubSlot {
@@ -110,26 +112,10 @@ impl AbRingAllocator {
 
     /// Writes the syscall stub template to a newly allocated buffer.
     ///
-    /// The stub includes `mov r10, rcx; mov eax, <ssn>; syscall; ret`, followed by padding.
+    /// The stub template is encrypted at build-time and decrypted only when writing.
     #[inline(always)]
     unsafe fn write_template(stub: *mut u8) {
-        const TEMPLATE: [u8; 11] = [
-            0x4C, 0x8B, 0xD1, // mov r10, rcx
-            0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax, <ssn>
-            0x0F, 0x05, // syscall
-            0xC3, // ret
-        ];
-
-        std::ptr::copy_nonoverlapping(
-            TEMPLATE.as_ptr(),
-            stub,
-            TEMPLATE.len(),
-        );
-        std::ptr::write_bytes(
-            stub.add(TEMPLATE.len()),
-            0xCC,
-            STUB_SIZE - TEMPLATE.len(),
-        );
+        write_syscall_stub(stub, 0);
     }
 
     /// Acquires a decrypted syscall stub from the ring.
@@ -148,19 +134,26 @@ impl AbRingAllocator {
             let slot = &self.slots[i];
 
             unsafe {
-                let mut old = PAGE_EXECUTE_READ;
-                VirtualProtect(slot.addr as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old);
+                #[cfg(feature = "secure")]
+                {
+                    let mut old = PAGE_EXECUTE_READ;
+                    VirtualProtect(slot.addr as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old);
+                }
 
                 if slot.encrypted.swap(false, Ordering::SeqCst) {
                     lea_decrypt_block(slot.addr, STUB_SIZE);
                 }
 
-                VirtualProtect(
-                    slot.addr as _,
-                    STUB_SIZE,
-                    PAGE_EXECUTE_READ,
-                    &mut old,
-                );
+                #[cfg(feature = "secure")]
+                {
+                    let mut old = PAGE_EXECUTE_READWRITE;
+                    VirtualProtect(
+                        slot.addr as _,
+                        STUB_SIZE,
+                        PAGE_EXECUTE_READ,
+                        &mut old,
+                    );
+                }
             }
 
             return Some(slot.addr);
@@ -180,19 +173,26 @@ impl AbRingAllocator {
         for slot in &self.slots {
             if slot.addr == addr {
                 unsafe {
-                    let mut old = PAGE_EXECUTE_READ;
-                    VirtualProtect(addr as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old);
+                    #[cfg(feature = "secure")]
+                    {
+                        let mut old = PAGE_EXECUTE_READ;
+                        VirtualProtect(addr as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old);
+                    }
 
                     write_bytes(addr, 0, STUB_SIZE);
                     Self::write_template(addr);
                     lea_encrypt_block(addr, STUB_SIZE);
 
-                    VirtualProtect(
-                        addr as _,
-                        STUB_SIZE,
-                        PAGE_NOACCESS,
-                        &mut old,
-                    );
+                    #[cfg(feature = "secure")]
+                    {
+                        let mut old = PAGE_EXECUTE_READWRITE;
+                        VirtualProtect(
+                            addr as _,
+                            STUB_SIZE,
+                            PAGE_NOACCESS,
+                            &mut old,
+                        );
+                    }
                 }
 
                 slot.encrypted.store(true, Ordering::SeqCst);

@@ -144,17 +144,24 @@ pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
         }
 
         let ssn_ptr = stub.add(4) as *mut u32;
-        let mut old = PAGE_EXECUTE_READ;
 
-        if !VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old).is_ok() {
-            AbOut!("RWX fail");
-            G_STUB_POOL.release(stub);
-            continue;
+        #[cfg(feature = "secure")]
+        {
+            let mut old = PAGE_EXECUTE_READ;
+            if !VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old).is_ok() {
+                AbOut!("RWX fail");
+                G_STUB_POOL.release(stub);
+                continue;
+            }
         }
 
         ssn_ptr.write_volatile(frame.syscall_id);
 
-        VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READ, &mut old).ok();
+        #[cfg(feature = "secure")]
+        {
+            let mut old = PAGE_EXECUTE_READWRITE;
+            VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READ, &mut old).ok();
+        }
 
         let fn_ptr: ABStubFn = std::mem::transmute(stub);
 
@@ -199,16 +206,23 @@ pub unsafe fn __ActiveBreachFire(name: &str, args: &[usize]) -> usize {
     }
 
     let ssn_ptr = stub.add(4) as *mut u32;
-    let mut old = PAGE_EXECUTE_READ;
 
-    if !VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old).is_ok() {
-        G_STUB_POOL.release(stub);
-        return ABErr(ABError::DispatchProtectFail) as usize;
+    #[cfg(feature = "secure")]
+    {
+        let mut old = PAGE_EXECUTE_READ;
+        if !VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old).is_ok() {
+            G_STUB_POOL.release(stub);
+            return ABErr(ABError::DispatchProtectFail) as usize;
+        }
     }
 
     ssn_ptr.write_volatile(ssn);
 
-    VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READ, &mut old).ok();
+    #[cfg(feature = "secure")]
+    {
+        let mut old = PAGE_EXECUTE_READWRITE;
+        VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READ, &mut old).ok();
+    }
 
     let frame = &mut *G_OPFRAME.as_mut_ptr();
 
