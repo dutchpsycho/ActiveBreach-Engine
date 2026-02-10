@@ -24,7 +24,7 @@ When the CPU executes the `syscall` instruction, it transitions execution into a
 
 ![Hooking Diagram](./Diagram/AB.png)
 
-This is where **ABE** comes in. **ABE** builds an in-process ring of stubs for each `syscall` instruction provided by `ntdll.dll`, encrypts them, and sets up a specialized dispatcher to decrypt and execute these syscalls. All execution is managed by ABE’s context-controlled dispatcher thread. This results in a controlled execution environment where system calls can be dispatched without user-mode monitoring or external product interference.
+This is where **ABE** comes in. **ABE** builds an in-process ring of syscall stubs, encrypts them, and sets up a specialized dispatcher to decrypt and execute these syscalls. All execution is managed by ABE’s context-controlled dispatcher thread. This results in a controlled execution environment where system calls can be dispatched without user-mode monitoring or external product interference.
 
 For a full technical outline, see [Technical Overview](./TECH.md)
 
@@ -36,7 +36,7 @@ For ease of integration, **ABE** is provided in three trims: C, C++, and Rust. R
 
 Primarily due to integration complexity. Linking cryptographic libraries and using Windows internal structures in C++ introduces development friction and unnecessary complexity. The goal of **ABE** is ease of integration, which means no external dependencies. As a result, the C and C++ versions are provided as single-include header files (`.h`).
 
-The Rust version includes exclusive features such as stub encryption, a custom stub ring allocator, and TLS callbacks.
+The Rust version includes exclusive features such as build-time encrypted stub templates, a custom stub ring allocator, and TLS callbacks.
 
 ## USAGE
 

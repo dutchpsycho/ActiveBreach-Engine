@@ -46,8 +46,11 @@ Output: `SDK\Rust\target\{debug,release}\libactivebreach.rlib`.
 
 ### Rust Harness (benchmark/tests)
 ```bash
-cd SDK\Rust\tests
-cargo run --release
+cd SDK\Rust
+cargo test --test activebreach_harness
+
+# stealth mode
+cargo test --no-default-features --features stealth --test activebreach_harness
 ```
 
 ### Konflict Variant (KFD-EDR-Version)
