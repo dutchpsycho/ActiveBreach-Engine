@@ -42,6 +42,13 @@ The Rust version includes exclusive features such as build-time encrypted stub t
 
 See [Usage Overview](./USAGE.md)
 
+## RUST FEATURE MODES
+
+The Rust SDK ships with two feature modes:
+
+- `secure` (default): Stub pages are protected at rest with `PAGE_NOACCESS`, and protection is flipped during decrypt/patch/execute. This reduces static exposure of stubs in memory but increases observable memory-protection transitions.
+- `stealth`: Protection flips are disabled to reduce observable `VirtualProtect` activity. Stub pages remain writable/executable in-process, lowering flip noise at the cost of keeping stubs more exposed in memory.
+
 ## Disclaimer
 
 This tool is provided for **educational and authorized security research only**.  
