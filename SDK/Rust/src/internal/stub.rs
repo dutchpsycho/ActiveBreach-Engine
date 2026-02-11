@@ -12,6 +12,7 @@ use windows::Win32::System::Memory::{
 use crate::internal::crypto::lea::{lea_decrypt_block, lea_encrypt_block};
 use crate::internal::diagnostics::*;
 use crate::internal::stub_template::write_syscall_stub;
+use crate::AbOut;
 pub use crate::internal::stub_template::STUB_SIZE;
 
 use once_cell::sync::Lazy;
@@ -51,17 +52,33 @@ unsafe impl Sync for AbRingAllocator {}
 
 pub static G_STUB_POOL: Lazy<AbRingAllocator> = Lazy::new(AbRingAllocator::init);
 
+#[inline(always)]
+pub fn mark_dispatcher_thread() {
+}
+
+
 impl AbRingAllocator {
     /// Initializes the stub ring, preallocating and encrypting each RWX stub.
     ///
     /// This is invoked once during dispatcher bootstrap. Each stub is encrypted immediately
     /// after its template is written, and protected with `PAGE_NOACCESS` until acquired.
     pub fn init() -> Self {
+        AbOut!("stub pool init: slots={}, stub_size=0x{:X}", NUM_STUBS, STUB_SIZE);
         let mut slots: [MaybeUninit<StubSlot>; NUM_STUBS] =
             std::array::from_fn(|_| MaybeUninit::uninit());
 
+        let mut min_addr: usize = usize::MAX;
+        let mut max_addr: usize = 0;
+
         for i in 0..NUM_STUBS {
             let stub = Self::alloc_stub().unwrap();
+            let stub_addr = stub as usize;
+            if stub_addr < min_addr {
+                min_addr = stub_addr;
+            }
+            if stub_addr > max_addr {
+                max_addr = stub_addr;
+            }
             unsafe {
                 Self::write_template(stub);
                 lea_encrypt_block(stub, STUB_SIZE);
@@ -82,6 +99,17 @@ impl AbRingAllocator {
 
         let slots = unsafe { std::mem::transmute::<_, [StubSlot; NUM_STUBS]>(slots) };
 
+        if min_addr != usize::MAX {
+            let range_end = max_addr.saturating_add(STUB_SIZE.saturating_sub(1));
+            AbOut!(
+                "stub pool range: 0x{:X}-0x{:X} ({} stubs)",
+                min_addr,
+                range_end,
+                NUM_STUBS
+            );
+        }
+
+        AbOut!("stub pool ready");
         Self {
             slots,
             index: AtomicUsize::new(0),

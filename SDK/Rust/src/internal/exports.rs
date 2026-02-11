@@ -1,8 +1,9 @@
-use rustc_hash::FxHashMap;
-use std::{borrow::Cow, ffi::CStr, os::raw::c_char, slice};
+use rustc_hash::{FxHashMap, FxHasher};
+use std::{borrow::Cow, ffi::CStr, hash::Hasher, os::raw::c_char, num::NonZeroUsize, slice};
 
 use windows::Win32::System::Diagnostics::Debug::RaiseException;
 use windows::Win32::System::Diagnostics::Debug::{IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER};
+use windows::Win32::System::Memory::{VirtualAlloc, VirtualProtect, MEM_COMMIT, MEM_RESERVE, PAGE_READONLY, PAGE_READWRITE};
 use windows::Win32::System::SystemServices::{IMAGE_DOS_HEADER, IMAGE_EXPORT_DIRECTORY};
 
 use once_cell::sync::OnceCell;
@@ -13,8 +14,121 @@ use crate::AbOut;
 
 type ULONG = u32;
 
-#[link_section = ".rdata$ab"]
-pub static SYSCALL_TABLE: OnceCell<FxHashMap<String, u32>> = OnceCell::new();
+const SYSCALL_TABLE_PAGE_SIZE: usize = 0x1000;
+
+#[repr(C)]
+struct SyscallTablePage {
+    table: FxHashMap<String, u32>,
+}
+
+pub struct SyscallTable {
+    page: OnceCell<NonZeroUsize>,
+    hash: OnceCell<u64>,
+}
+
+impl SyscallTable {
+    pub const fn new() -> Self {
+        Self {
+            page: OnceCell::new(),
+            hash: OnceCell::new(),
+        }
+    }
+
+    pub fn is_init(&self) -> bool {
+        self.page.get().is_some()
+    }
+
+    pub fn get(&self) -> Option<&'static FxHashMap<String, u32>> {
+        let addr = self.page.get()?.get();
+        let page = addr as *const SyscallTablePage;
+        unsafe { Some(&(*page).table) }
+    }
+
+    pub fn init(&self, map: FxHashMap<String, u32>) -> Result<(), u32> {
+        if self.page.get().is_some() {
+            return Err(ABErr(ABError::AlreadyInit));
+        }
+
+        let page = alloc_syscall_table_page()?;
+        let page_ptr = page.get() as *mut SyscallTablePage;
+        unsafe {
+            page_ptr.write(SyscallTablePage { table: map });
+        }
+
+        if self.page.set(page).is_err() {
+            return Err(ABErr(ABError::AlreadyInit));
+        }
+
+        AbOut!("SYSCALL_TABLE initialized @ {:p} (entries={})", page_ptr, unsafe {
+            (*page_ptr).table.len()
+        });
+
+        let mut old = PAGE_READWRITE;
+        if !unsafe {
+            VirtualProtect(
+                page_ptr as _,
+                SYSCALL_TABLE_PAGE_SIZE,
+                PAGE_READONLY,
+                &mut old,
+            )
+        }
+        .is_ok()
+        {
+            return Err(ABErr(ABError::SyscallTableProtectFail));
+        }
+
+        AbOut!("SYSCALL_TABLE set to READONLY");
+
+        let hash = unsafe { hash_syscall_table(&(*page_ptr).table) };
+        if self.hash.set(hash).is_err() {
+            return Err(ABErr(ABError::AlreadyInit));
+        }
+
+        AbOut!("SYSCALL_TABLE hash = 0x{:016X}", hash);
+
+        Ok(())
+    }
+
+    pub fn verify_hash_with(&self, table: &FxHashMap<String, u32>) -> bool {
+        let expected = match self.hash.get() {
+            Some(h) => *h,
+            None => return false,
+        };
+
+        let current = hash_syscall_table(table);
+        current == expected
+    }
+}
+
+pub static SYSCALL_TABLE: SyscallTable = SyscallTable::new();
+
+fn alloc_syscall_table_page() -> Result<NonZeroUsize, u32> {
+    debug_assert!(
+        std::mem::size_of::<SyscallTablePage>() <= SYSCALL_TABLE_PAGE_SIZE
+    );
+
+    let ptr = unsafe {
+        VirtualAlloc(
+            None,
+            SYSCALL_TABLE_PAGE_SIZE,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        ) as *mut SyscallTablePage
+    };
+
+    NonZeroUsize::new(ptr as usize).ok_or_else(|| ABErr(ABError::SyscallTableAllocFail))
+}
+
+fn hash_syscall_table(table: &FxHashMap<String, u32>) -> u64 {
+    let mut hasher = FxHasher::default();
+    hasher.write_usize(table.len());
+    for (name, ssn) in table.iter() {
+        hasher.write_usize(name.len());
+        hasher.write(name.as_bytes());
+        hasher.write_u32(*ssn);
+    }
+    hasher.finish()
+}
 
 #[inline]
 fn normalize_sys_name(name: &str) -> Cow<'_, str> {
@@ -66,7 +180,7 @@ pub unsafe fn ExSyscalls(ntdll: *const u8, size: usize) -> Result<(), u32> {
         AbOut!("image size is zero");
         return Err(ABErr(ABError::Null));
     }
-    if SYSCALL_TABLE.get().is_some() {
+    if SYSCALL_TABLE.is_init() {
         AbOut!("syscall table already initialized");
         return Err(ABErr(ABError::AlreadyInit));
     }
@@ -161,9 +275,7 @@ pub unsafe fn ExSyscalls(ntdll: *const u8, size: usize) -> Result<(), u32> {
         map.insert(key, ssn);
     }
 
-    if SYSCALL_TABLE.set(map).is_err() {
-        return Err(ABErr(ABError::AlreadyInit));
-    }
+    SYSCALL_TABLE.init(map)?;
 
     drop_ntdll();
     Ok(())

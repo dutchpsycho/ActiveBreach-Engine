@@ -10,6 +10,8 @@ use windows::Win32::System::Diagnostics::Debug::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemServices::IMAGE_DOS_HEADER;
 use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+#[cfg(all(feature = "secure", not(debug_assertions)))]
+use windows::Win32::System::Threading::ExitProcess;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ViolationType {
@@ -157,6 +159,10 @@ fn is_debugger_attached() -> bool {
 pub fn evaluate() {
     if is_debugger_attached() {
         notify_violation(ViolationType::DebuggerDetected);
+        #[cfg(all(feature = "secure", not(debug_assertions)))]
+        unsafe {
+            ExitProcess(0);
+        }
         return;
     }
 

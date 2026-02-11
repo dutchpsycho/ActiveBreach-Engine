@@ -21,6 +21,7 @@ use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use windows::Win32::System::Memory::{VirtualProtect, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE};
+use windows::Win32::System::Threading::{ExitProcess, GetCurrentThreadId};
 
 use crate::internal::antibreach;
 use crate::internal::diagnostics::{ABErr, ABError};
@@ -109,6 +110,10 @@ fn cpu_pause() {
 /// It assumes `G_OPFRAME` is uninitialized and will remain in memory.
 ///
 pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
+    crate::internal::stub::mark_dispatcher_thread();
+    AbOut!("dispatcher thread started @ {:p} (TID={})",
+        thread_proc as *const (), unsafe { GetCurrentThreadId() }
+    );
     G_OPFRAME.write(ABOpFrame::default());
     G_READY.store(true, Ordering::Release);
     AbOut!("opframe initialized, ready flag set");
@@ -189,6 +194,13 @@ pub unsafe fn __ActiveBreachFire(name: &str, args: &[usize]) -> usize {
         Some(t) => t,
         None => return ABErr(ABError::DispatchTableMissing) as usize,
     };
+
+    if !SYSCALL_TABLE.verify_hash_with(tbl) {
+        AbOut!("syscall table hash mismatch");
+        unsafe {
+            ExitProcess(0);
+        }
+    }
 
     let ssn = match tbl.get(name) {
         Some(n) => *n,

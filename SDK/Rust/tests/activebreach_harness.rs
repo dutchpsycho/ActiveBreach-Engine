@@ -52,7 +52,6 @@ use winapi::{
     },
 };
 
-use activebreach::internal::exports::{get_syscall_table, SYSCALL_TABLE};
 use activebreach::{ab_call, activebreach_launch};
 
 use winapi::shared::ntdef::OBJECT_ATTRIBUTES;
@@ -193,14 +192,6 @@ fn main() {
     struct CLIENT_ID {
         UniqueProcess: winapi::shared::ntdef::HANDLE,
         UniqueThread: winapi::shared::ntdef::HANDLE,
-    }
-
-    if let Some(table) = get_syscall_table() {
-        for (name, id) in table.iter() {
-            println!("{:<32} = 0x{:X}", name, id);
-        }
-    } else {
-        println!("syscall table is uninitialized");
     }
 
     let self_process = (-1isize) as HANDLE;

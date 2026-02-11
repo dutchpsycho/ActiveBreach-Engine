@@ -40,6 +40,8 @@ pub enum ABError {
     DispatchStubAllocFail,
     DispatchStubMisaligned,
     DispatchProtectFail,
+    SyscallTableAllocFail,
+    SyscallTableProtectFail,
     VEHInitFail,
 }
 
@@ -89,6 +91,8 @@ pub static ERROR_CODES: Lazy<Mutex<HashMap<ABError, u32>>> = Lazy::new(|| {
         ABError::DispatchStubAllocFail,
         ABError::DispatchStubMisaligned,
         ABError::DispatchProtectFail,
+        ABError::SyscallTableAllocFail,
+        ABError::SyscallTableProtectFail,
         ABError::VEHInitFail,
     ] {
         let key = format!("{:?}", err);
