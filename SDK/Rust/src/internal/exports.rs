@@ -1,15 +1,20 @@
 use rustc_hash::{FxHashMap, FxHasher};
-use std::{borrow::Cow, ffi::CStr, hash::Hasher, os::raw::c_char, num::NonZeroUsize, slice};
+use std::ptr::write_bytes;
+use std::sync::Mutex;
+use std::{borrow::Cow, ffi::CStr, hash::Hasher, num::NonZeroUsize, os::raw::c_char, slice};
 
 use windows::Win32::System::Diagnostics::Debug::RaiseException;
 use windows::Win32::System::Diagnostics::Debug::{IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER};
-use windows::Win32::System::Memory::{VirtualAlloc, VirtualProtect, MEM_COMMIT, MEM_RESERVE, PAGE_READONLY, PAGE_READWRITE};
+use windows::Win32::System::Memory::{
+    VirtualAlloc, VirtualFree, VirtualProtect, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READONLY,
+    PAGE_READWRITE,
+};
 use windows::Win32::System::SystemServices::{IMAGE_DOS_HEADER, IMAGE_EXPORT_DIRECTORY};
 
-use once_cell::sync::OnceCell;
+use once_cell::sync::Lazy;
 
 use crate::internal::diagnostics::*;
-use crate::internal::mapper::drop_ntdll;
+use crate::internal::mapper;
 use crate::AbOut;
 
 type ULONG = u32;
@@ -21,91 +26,16 @@ struct SyscallTablePage {
     table: FxHashMap<String, u32>,
 }
 
-pub struct SyscallTable {
-    page: OnceCell<NonZeroUsize>,
-    hash: OnceCell<u64>,
+struct SyscallTableInner {
+    page: usize,
+    hash: u64,
 }
 
-impl SyscallTable {
-    pub const fn new() -> Self {
-        Self {
-            page: OnceCell::new(),
-            hash: OnceCell::new(),
-        }
-    }
-
-    pub fn is_init(&self) -> bool {
-        self.page.get().is_some()
-    }
-
-    pub fn get(&self) -> Option<&'static FxHashMap<String, u32>> {
-        let addr = self.page.get()?.get();
-        let page = addr as *const SyscallTablePage;
-        unsafe { Some(&(*page).table) }
-    }
-
-    pub fn init(&self, map: FxHashMap<String, u32>) -> Result<(), u32> {
-        if self.page.get().is_some() {
-            return Err(ABErr(ABError::AlreadyInit));
-        }
-
-        let page = alloc_syscall_table_page()?;
-        let page_ptr = page.get() as *mut SyscallTablePage;
-        unsafe {
-            page_ptr.write(SyscallTablePage { table: map });
-        }
-
-        if self.page.set(page).is_err() {
-            return Err(ABErr(ABError::AlreadyInit));
-        }
-
-        AbOut!("SYSCALL_TABLE initialized @ {:p} (entries={})", page_ptr, unsafe {
-            (*page_ptr).table.len()
-        });
-
-        let mut old = PAGE_READWRITE;
-        if !unsafe {
-            VirtualProtect(
-                page_ptr as _,
-                SYSCALL_TABLE_PAGE_SIZE,
-                PAGE_READONLY,
-                &mut old,
-            )
-        }
-        .is_ok()
-        {
-            return Err(ABErr(ABError::SyscallTableProtectFail));
-        }
-
-        AbOut!("SYSCALL_TABLE set to READONLY");
-
-        let hash = unsafe { hash_syscall_table(&(*page_ptr).table) };
-        if self.hash.set(hash).is_err() {
-            return Err(ABErr(ABError::AlreadyInit));
-        }
-
-        AbOut!("SYSCALL_TABLE hash = 0x{:016X}", hash);
-
-        Ok(())
-    }
-
-    pub fn verify_hash_with(&self, table: &FxHashMap<String, u32>) -> bool {
-        let expected = match self.hash.get() {
-            Some(h) => *h,
-            None => return false,
-        };
-
-        let current = hash_syscall_table(table);
-        current == expected
-    }
-}
-
-pub static SYSCALL_TABLE: SyscallTable = SyscallTable::new();
+static SYSCALL_TABLE_INNER: Lazy<Mutex<SyscallTableInner>> =
+    Lazy::new(|| Mutex::new(SyscallTableInner { page: 0, hash: 0 }));
 
 fn alloc_syscall_table_page() -> Result<NonZeroUsize, u32> {
-    debug_assert!(
-        std::mem::size_of::<SyscallTablePage>() <= SYSCALL_TABLE_PAGE_SIZE
-    );
+    debug_assert!(std::mem::size_of::<SyscallTablePage>() <= SYSCALL_TABLE_PAGE_SIZE);
 
     let ptr = unsafe {
         VirtualAlloc(
@@ -159,8 +89,7 @@ unsafe fn rva_to_ptr_or_fault(
         let virt_start = sec.VirtualAddress as usize;
         let virt_size = unsafe { sec.Misc.VirtualSize as usize };
         if rva >= virt_start && rva < virt_start + virt_size {
-            let file_offset =
-                sec.PointerToRawData as usize + (rva - virt_start);
+            let file_offset = sec.PointerToRawData as usize + (rva - virt_start);
             if file_offset < size {
                 return Ok(base.add(file_offset));
             }
@@ -171,7 +100,9 @@ unsafe fn rva_to_ptr_or_fault(
     Err(fault_code + 2)
 }
 
-pub unsafe fn ExSyscalls(ntdll: *const u8, size: usize) -> Result<(), u32> {
+unsafe fn ExSyscalls(img: &mapper::MappedImage) -> Result<(), u32> {
+    let ntdll = img.as_ptr();
+    let size = img.size();
     if ntdll.is_null() {
         AbOut!("ntdll ptr is null");
         return Err(ABErr(ABError::NotInit));
@@ -180,7 +111,7 @@ pub unsafe fn ExSyscalls(ntdll: *const u8, size: usize) -> Result<(), u32> {
         AbOut!("image size is zero");
         return Err(ABErr(ABError::Null));
     }
-    if SYSCALL_TABLE.is_init() {
+    if syscall_table_is_init() {
         AbOut!("syscall table already initialized");
         return Err(ABErr(ABError::AlreadyInit));
     }
@@ -236,8 +167,7 @@ pub unsafe fn ExSyscalls(ntdll: *const u8, size: usize) -> Result<(), u32> {
         ABErr(ABError::ExportFail),
     )? as *const u32;
 
-    let mut map =
-        FxHashMap::with_capacity_and_hasher(name_count, Default::default());
+    let mut map = FxHashMap::with_capacity_and_hasher(name_count, Default::default());
 
     for i in 0..name_count {
         let name_rva = std::ptr::read_unaligned(names.add(i)) as usize;
@@ -269,24 +199,23 @@ pub unsafe fn ExSyscalls(ntdll: *const u8, size: usize) -> Result<(), u32> {
             continue;
         }
 
-        let ssn =
-            u32::from_le_bytes([sig[4], sig[5], sig[6], sig[7]]);
+        let ssn = u32::from_le_bytes([sig[4], sig[5], sig[6], sig[7]]);
         let key = String::from_utf8_unchecked(name.to_vec());
         map.insert(key, ssn);
     }
 
-    SYSCALL_TABLE.init(map)?;
+    init_syscall_table_from_map(map)?;
 
-    drop_ntdll();
     Ok(())
 }
 
-pub fn get_syscall_table() -> Option<&'static FxHashMap<String, u32>> {
-    SYSCALL_TABLE.get()
-}
-
 pub fn lookup_ssn(name: &str) -> Option<u32> {
-    let tbl = SYSCALL_TABLE.get()?;
+    let g = SYSCALL_TABLE_INNER.lock().unwrap();
+    if g.page == 0 {
+        return None;
+    }
+    let page = g.page as *const SyscallTablePage;
+    let tbl = unsafe { &(*page).table };
     let norm = normalize_sys_name(name);
     let result = tbl.get(norm.as_ref()).copied();
 
@@ -296,4 +225,96 @@ pub fn lookup_ssn(name: &str) -> Option<u32> {
     }
 
     result
+}
+
+pub fn syscall_table_is_init() -> bool {
+    let g = SYSCALL_TABLE_INNER.lock().unwrap();
+    g.page != 0
+}
+
+pub fn verify_syscall_table_hash() -> bool {
+    let g = SYSCALL_TABLE_INNER.lock().unwrap();
+    if g.page == 0 {
+        return false;
+    }
+    let page = g.page as *const SyscallTablePage;
+    let tbl = unsafe { &(*page).table };
+    hash_syscall_table(tbl) == g.hash
+}
+
+pub fn ensure_syscall_table_init() -> Result<(), u32> {
+    if syscall_table_is_init() {
+        return Ok(());
+    }
+
+    let img =
+        unsafe { mapper::map_ntdll_image() }.ok_or_else(|| ABErr(ABError::ThreadFilemapFail))?;
+    unsafe { ExSyscalls(&img) }?;
+    Ok(())
+}
+
+pub fn deinit_syscall_table() {
+    let mut g = SYSCALL_TABLE_INNER.lock().unwrap();
+    if g.page == 0 {
+        return;
+    }
+
+    unsafe {
+        let page_ptr = g.page as *mut SyscallTablePage;
+        let mut old = PAGE_READONLY;
+        let _ = VirtualProtect(
+            page_ptr as _,
+            SYSCALL_TABLE_PAGE_SIZE,
+            PAGE_READWRITE,
+            &mut old,
+        );
+
+        std::ptr::drop_in_place(page_ptr);
+        write_bytes(page_ptr as *mut u8, 0, SYSCALL_TABLE_PAGE_SIZE);
+        let _ = VirtualFree(page_ptr as _, 0, MEM_RELEASE);
+    }
+
+    g.page = 0;
+    g.hash = 0;
+}
+
+fn init_syscall_table_from_map(map: FxHashMap<String, u32>) -> Result<(), u32> {
+    let mut g = SYSCALL_TABLE_INNER.lock().unwrap();
+    if g.page != 0 {
+        return Err(ABErr(ABError::AlreadyInit));
+    }
+
+    let page = alloc_syscall_table_page()?;
+    let page_ptr = page.get() as *mut SyscallTablePage;
+    unsafe {
+        page_ptr.write(SyscallTablePage { table: map });
+    }
+
+    AbOut!(
+        "SYSCALL_TABLE initialized @ {:p} (entries={})",
+        page_ptr,
+        unsafe { (*page_ptr).table.len() }
+    );
+
+    let mut old = PAGE_READWRITE;
+    if !unsafe {
+        VirtualProtect(
+            page_ptr as _,
+            SYSCALL_TABLE_PAGE_SIZE,
+            PAGE_READONLY,
+            &mut old,
+        )
+    }
+    .is_ok()
+    {
+        return Err(ABErr(ABError::SyscallTableProtectFail));
+    }
+
+    AbOut!("SYSCALL_TABLE set to READONLY");
+
+    g.hash = unsafe { hash_syscall_table(&(*page_ptr).table) };
+    AbOut!("SYSCALL_TABLE hash = 0x{:016X}", g.hash);
+
+    g.page = page_ptr as usize;
+    Ok(())
 }

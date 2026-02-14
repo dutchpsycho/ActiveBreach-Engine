@@ -1,59 +1,170 @@
 #![allow(non_snake_case)]
 
-use once_cell::sync::OnceCell;
+use std::borrow::Cow;
+use std::ffi::CString;
 use std::ops::Add;
-use std::{ffi::CString, ptr::null_mut};
 
-use windows::core::PCSTR;
+use windows::Win32::Foundation::UNICODE_STRING;
 use windows::Win32::System::Diagnostics::Debug::{
     IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_NT_HEADERS64,
 };
-use windows::Win32::System::LibraryLoader::GetModuleHandleA;
 use windows::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
 use windows::Win32::System::SystemServices::{IMAGE_DOS_HEADER, IMAGE_EXPORT_DIRECTORY};
 
-/// Total size of each synthetic stack page, per thread/profile (in bytes).
+/// Total size of each synthetic stack page, per thread (in bytes).
 const SW_STACK_SIZE: usize = 0x1000;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LIST_ENTRY {
+    flink: *const LIST_ENTRY,
+    blink: *const LIST_ENTRY,
+}
+
+#[repr(C)]
+struct PEB_LDR_DATA {
+    _len: u32,
+    _initialized: u8,
+    _pad0: [u8; 3],
+    _ss_handle: *mut core::ffi::c_void,
+    _in_load_order: LIST_ENTRY,
+    in_memory_order: LIST_ENTRY,
+    _in_init_order: LIST_ENTRY,
+}
+
+#[cfg(target_pointer_width = "64")]
+#[repr(C)]
+struct LDR_DATA_TABLE_ENTRY {
+    _in_load_order_links: LIST_ENTRY,
+    in_memory_order_links: LIST_ENTRY,
+    _in_init_order_links: LIST_ENTRY,
+    dll_base: *mut core::ffi::c_void,
+    _entry_point: *mut core::ffi::c_void,
+    _size_of_image: u32,
+    _pad0: u32,
+    _full_dll_name: UNICODE_STRING,
+    base_dll_name: UNICODE_STRING,
+}
+
+#[cfg(target_pointer_width = "32")]
+#[repr(C)]
+struct LDR_DATA_TABLE_ENTRY {
+    _in_load_order_links: LIST_ENTRY,
+    in_memory_order_links: LIST_ENTRY,
+    _in_init_order_links: LIST_ENTRY,
+    dll_base: *mut core::ffi::c_void,
+    _entry_point: *mut core::ffi::c_void,
+    _size_of_image: u32,
+    _full_dll_name: UNICODE_STRING,
+    base_dll_name: UNICODE_STRING,
+}
+
+#[inline(always)]
+fn read_peb() -> *const u8 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let peb: usize;
+        unsafe {
+            core::arch::asm!("mov {0}, gs:[0x60]", out(reg) peb);
+        }
+        return peb as *const u8;
+    }
+
+    #[cfg(target_arch = "x86")]
+    {
+        let peb: u32;
+        unsafe {
+            core::arch::asm!("mov {0:e}, fs:[0x30]", out(reg) peb);
+        }
+        return peb as *const u8;
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+    {
+        core::ptr::null()
+    }
+}
+
+#[inline(always)]
+fn ascii_byte_upper(b: u8) -> u8 {
+    if (b'a'..=b'z').contains(&b) {
+        b - 32
+    } else {
+        b
+    }
+}
+
+unsafe fn unicode_eq_ascii_case_insensitive(us: &UNICODE_STRING, ascii: &str) -> bool {
+    if us.Buffer.is_null() {
+        return false;
+    }
+    let wide = core::slice::from_raw_parts(us.Buffer.0, (us.Length as usize) / 2);
+    if wide.len() != ascii.len() {
+        return false;
+    }
+
+    for (w, b) in wide.iter().zip(ascii.bytes()) {
+        let w = *w;
+        if w > 0x7F {
+            return false;
+        }
+        let wc = ascii_byte_upper(w as u8);
+        let bc = ascii_byte_upper(b);
+        if wc != bc {
+            return false;
+        }
+    }
+
+    true
+}
+
+unsafe fn get_module_base_peb(module: &str) -> Option<usize> {
+    // Under the hood, GetModuleHandleA walks PEB->Ldr module lists.
+    let peb = read_peb();
+    if peb.is_null() {
+        return None;
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    const PEB_LDR_OFFSET: usize = 0x18;
+    #[cfg(target_pointer_width = "32")]
+    const PEB_LDR_OFFSET: usize = 0x0C;
+
+    let ldr = *(peb.add(PEB_LDR_OFFSET) as *const *const PEB_LDR_DATA);
+    let ldr = ldr.as_ref()?;
+    let head = &ldr.in_memory_order as *const LIST_ENTRY;
+
+    let mut cur = ldr.in_memory_order.flink;
+    let link_off = core::mem::offset_of!(LDR_DATA_TABLE_ENTRY, in_memory_order_links);
+
+    // Avoid infinite loops if the list is corrupted.
+    for _ in 0..512 {
+        if cur.is_null() || cur == head {
+            break;
+        }
+        let entry = (cur as usize).wrapping_sub(link_off) as *const LDR_DATA_TABLE_ENTRY;
+        let entry = entry.as_ref()?;
+
+        if unicode_eq_ascii_case_insensitive(&entry.base_dll_name, module) {
+            return Some(entry.dll_base as usize);
+        }
+
+        cur = (*cur).flink;
+    }
+
+    None
+}
 
 /// Type alias for base pointer to allocated fake stack.
 type StackBase = *mut u64;
 
-/// Classification of NT syscall group to determine appropriate
-/// synthetic call stack structure.
-#[derive(Copy, Clone)]
-enum Profile {
-    /// Memory-related syscalls (e.g., `VirtualAlloc`, `VirtualProtect`)
-    Memory = 0,
-    /// Process-related syscalls (e.g., `OpenProcess`, `CreateProcessW`)
-    Process = 1,
-    /// Thread-related syscalls (e.g., `CreateRemoteThread`, `SuspendThread`)
-    Thread = 2,
-    /// File-mapping and image mapping syscalls (e.g., `MapViewOfFile`)
-    Mapping = 3,
-}
-
-/// Thread-local synthetic stack pages used for stack spoofing.
-/// One reserved page per syscall group.
+// Thread-local synthetic stack page used for stack spoofing.
 thread_local! {
-    static SW_PAGES: std::cell::RefCell<[Option<StackBase>; 4]> =
-        std::cell::RefCell::new([None, None, None, None]);
+    static SW_PAGE: std::cell::RefCell<Option<StackBase>> =
+        std::cell::RefCell::new(None);
 }
 
-/// Static structure holding pre-resolved addresses of common export functions
-/// used to simulate realistic call stacks.
-struct SwStackProf {
-    memory: &'static [u64],
-    process: &'static [u64],
-    thread: &'static [u64],
-    mapping: &'static [u64],
-}
-
-/// Lazily initialized global singleton containing spoof stack templates
-/// categorized by syscall group.
-static PROFILES: OnceCell<SwStackProf> = OnceCell::new();
-
-/// Initializes the Sidewinder engine by resolving and storing
-/// key export addresses that represent plausible return frames.
+/// Initializes the Sidewinder engine by ensuring `ntdll.dll` is loaded.
 ///
 /// # Safety
 /// This function must only be called once before use. It interacts with raw pointers
@@ -62,75 +173,18 @@ static PROFILES: OnceCell<SwStackProf> = OnceCell::new();
 /// # Returns
 /// `Ok(())` on success, or `Err(&'static str)` if initialization fails.
 pub unsafe fn SidewinderInit() -> Result<(), &'static str> {
-    PROFILES.get_or_try_init(|| {
-        Ok(SwStackProf {
-            memory: _SwAllocStatic(&[
-                ("KERNELBASE.DLL", "VirtualAlloc"),
-                ("KERNELBASE.DLL", "VirtualFree"),
-                ("KERNELBASE.DLL", "VirtualProtect"),
-                ("KERNEL32.DLL", "VirtualQuery"),
-                ("KERNEL32.DLL", "GetProcessHeap"),
-                ("KERNEL32.DLL", "HeapAlloc"),
-                ("KERNEL32.DLL", "HeapFree"),
-                ("NTDLL.DLL", "RtlAllocateHeap"),
-                ("NTDLL.DLL", "RtlFreeHeap"),
-                ("KERNELBASE.DLL", "LocalAlloc"),
-                ("KERNELBASE.DLL", "LocalFree"),
-                ("KERNELBASE.DLL", "MapViewOfFile"),
-                ("KERNELBASE.DLL", "UnmapViewOfFile"),
-            ])?,
-            process: _SwAllocStatic(&[
-                ("KERNEL32.DLL", "OpenProcess"),
-                ("KERNEL32.DLL", "TerminateProcess"),
-                ("KERNEL32.DLL", "CreateProcessW"),
-                ("KERNEL32.DLL", "GetCurrentProcess"),
-                ("KERNEL32.DLL", "GetCurrentProcessId"),
-                ("NTDLL.DLL", "RtlGetCurrentProcessId"),
-                ("ADVAPI32.DLL", "OpenProcessToken"),
-                ("ADVAPI32.DLL", "LookupPrivilegeValueW"),
-                ("ADVAPI32.DLL", "AdjustTokenPrivileges"),
-                ("ADVAPI32.DLL", "GetTokenInformation"),
-                ("KERNEL32.DLL", "SetHandleInformation"),
-            ])?,
-            thread: _SwAllocStatic(&[
-                ("KERNEL32.DLL", "CreateRemoteThreadEx"),
-                ("KERNELBASE.DLL", "SuspendThread"),
-                ("KERNELBASE.DLL", "ResumeThread"),
-                ("KERNEL32.DLL", "GetCurrentThread"),
-                ("KERNEL32.DLL", "GetCurrentThreadId"),
-                ("KERNEL32.DLL", "SetThreadContext"),
-                ("KERNEL32.DLL", "GetThreadContext"),
-                ("KERNEL32.DLL", "QueueUserAPC"),
-                ("KERNEL32.DLL", "SleepEx"),
-                ("NTDLL.DLL", "RtlNtStatusToDosError"),
-            ])?,
-            mapping: _SwAllocStatic(&[
-                ("KERNEL32.DLL", "CreateFileMappingW"),
-                ("KERNELBASE.DLL", "MapViewOfFile"),
-                ("KERNELBASE.DLL", "UnmapViewOfFile"),
-                ("KERNEL32.DLL", "FlushViewOfFile"),
-                ("KERNEL32.DLL", "CreateFileW"),
-                ("KERNEL32.DLL", "ReadFile"),
-                ("KERNEL32.DLL", "WriteFile"),
-                ("KERNEL32.DLL", "CloseHandle"),
-                ("KERNELBASE.DLL", "GetFileSize"),
-                ("KERNEL32.DLL", "SetFilePointerEx"),
-            ])?,
-        })
-    })?;
+    get_module_base_peb("NTDLL.DLL").ok_or("NTDLL.DLL not loaded")?;
     Ok(())
 }
 
-/// Allocates or retrieves a per-thread stack spoofing page
-/// for a given syscall profile. Each thread only receives one page per profile.
+/// Allocates or retrieves a per-thread stack spoofing page.
 ///
 /// # Safety
 /// Relies on correct memory layout and page commit by VirtualAlloc.
-unsafe fn _SwGetPage(profile: Profile) -> Option<StackBase> {
-    SW_PAGES.with(|cell| {
-        let mut pages = cell.borrow_mut();
-        let idx = profile as usize;
-        if let Some(ptr) = pages[idx] {
+unsafe fn _SwGetPage() -> Option<StackBase> {
+    SW_PAGE.with(|cell| {
+        let mut page = cell.borrow_mut();
+        if let Some(ptr) = *page {
             Some(ptr)
         } else {
             let p = VirtualAlloc(
@@ -142,7 +196,7 @@ unsafe fn _SwGetPage(profile: Profile) -> Option<StackBase> {
             if p.is_null() {
                 return None;
             }
-            pages[idx] = Some(p);
+            *page = Some(p);
             Some(p)
         }
     })
@@ -152,58 +206,72 @@ unsafe fn _SwGetPage(profile: Profile) -> Option<StackBase> {
 /// and returns a pointer to the base of the spoofed stack.
 ///
 /// # Arguments
-/// * `nt_name` - Name of the NT syscall (e.g., "NtOpenProcess").
-/// * `stub` - Pointer to the instruction following the call to syscall stub.
+/// * `nt_stub` - Address of the NT export stub in loaded `ntdll.dll`.
 ///
 /// # Returns
 /// A pointer (`usize`) to the base of the fake stack (SP value).
-pub fn AbStackWinder(nt_name: &str, stub: *mut u8) -> Option<usize> {
-    let profile = match nt_name {
-        n if n.starts_with("NtOpenProcess") || n.starts_with("NtTerminateProcess") => {
-            Profile::Process
-        }
-        n if n.starts_with("NtCreateThread") || n.starts_with("NtSuspendThread") => Profile::Thread,
-        n if n.starts_with("NtMapView") || n.starts_with("NtUnmapView") => Profile::Mapping,
-        _ => Profile::Memory,
-    };
-
-    let stub_ret = unsafe { stub.add(5) as u64 };
-
-    let tbl = PROFILES.get()?;
-    let frames: &[u64] = match profile {
-        Profile::Memory => tbl.memory,
-        Profile::Process => tbl.process,
-        Profile::Thread => tbl.thread,
-        Profile::Mapping => tbl.mapping,
-    };
-
-    let base = unsafe { _SwGetPage(profile)? };
-    let mut sp = unsafe { ((base.add(SW_STACK_SIZE / 8) as usize) & !0xF) as *mut u64 };
+pub fn AbStackWinder(nt_stub: u64) -> Option<usize> {
+    let base = unsafe { _SwGetPage()? };
+    let top = unsafe { ((base.add(SW_STACK_SIZE / 8) as usize) & !0xF) as *mut u64 };
+    // Reserve headroom so shadow space + 12 stack args (16-arg ABI) stay inside the page.
+    const CALL_HEADROOM: isize = 0x80;
+    let sp = unsafe { top.offset(-CALL_HEADROOM / 8) };
 
     unsafe {
-        sp = sp.offset(-1);
-        sp.write(stub_ret);
-        for &ret in frames.iter().rev() {
-            sp = sp.offset(-1);
-            sp.write(ret);
-        }
+        // The compiler will reserve 0x20 shadow space before the call, so
+        // place the spoofed return at [rsp_at_call] = (sp - 0x20).
+        let slot = sp.offset(-4);
+        slot.write(nt_stub);
     }
 
     Some(sp as usize)
 }
 
-/// Resolves a static list of (module, export) pairs into
-/// a leaked slice of absolute return addresses.
-///
-/// # Safety
-/// Assumes all input DLLs are loaded and valid PE format.
-unsafe fn _SwAllocStatic(pairs: &[(&str, &str)]) -> Result<&'static [u64], &'static str> {
-    let mut v = Vec::with_capacity(pairs.len());
-    for &(m, e) in pairs {
-        v.push(_SwResExp(m, e)?);
+/// Resolves the export stub address for a given NT syscall inside loaded `ntdll.dll`.
+pub fn resolve_ntdll_stub(nt_name: &str) -> Option<u64> {
+    let norm = normalize_sys_name(nt_name);
+    unsafe { _SwResExp("NTDLL.DLL", norm.as_ref()).ok() }
+}
+
+#[cfg(debug_assertions)]
+pub fn debug_fake_stack_bounds() -> Option<(usize, usize)> {
+    SW_PAGE.with(|cell| {
+        let base = match *cell.borrow() {
+            Some(p) => p,
+            None => return None,
+        };
+        let start = base as usize;
+        Some((start, start + SW_STACK_SIZE))
+    })
+}
+
+#[cfg(debug_assertions)]
+pub fn debug_ntdll_image_range() -> Option<(usize, usize)> {
+    unsafe {
+        let base = get_module_base_peb("NTDLL.DLL")?;
+
+        let dos = &*(base as *const IMAGE_DOS_HEADER);
+        if dos.e_magic != 0x5A4D {
+            return None;
+        }
+
+        let nt = &*((base + dos.e_lfanew as usize) as *const IMAGE_NT_HEADERS64);
+        if nt.Signature != 0x0000_4550 {
+            return None;
+        }
+
+        let size = nt.OptionalHeader.SizeOfImage as usize;
+        Some((base, base.saturating_add(size)))
     }
-    v.shrink_to_fit();
-    Ok(Box::leak(v.into_boxed_slice()))
+}
+
+#[inline]
+fn normalize_sys_name(name: &str) -> Cow<'_, str> {
+    if name.starts_with("Zw") {
+        Cow::Owned(format!("Nt{}", &name[2..]))
+    } else {
+        Cow::Borrowed(name)
+    }
 }
 
 /// Resolves the absolute virtual address of a given export
@@ -219,11 +287,7 @@ unsafe fn _SwAllocStatic(pairs: &[(&str, &str)]) -> Result<&'static [u64], &'sta
 /// # Returns
 /// Absolute address of the export as `u64`, or error.
 unsafe fn _SwResExp(module: &str, export: &str) -> Result<u64, &'static str> {
-    let mod_name = cstr(module);
-
-    let hmod = GetModuleHandleA(PCSTR(mod_name.as_ptr() as *const u8))
-        .map_err(|_| "GetModuleHandleA failed")?;
-    let base = hmod.0 as usize;
+    let base = get_module_base_peb(module).ok_or("module not loaded")?;
 
     let dos = &*(base as *const IMAGE_DOS_HEADER);
     if dos.e_magic != 0x5A4D {
@@ -241,25 +305,18 @@ unsafe fn _SwResExp(module: &str, export: &str) -> Result<u64, &'static str> {
         return Err("No export dir");
     }
 
-    let exp =
-        &*((base + dir as usize) as *const IMAGE_EXPORT_DIRECTORY);
+    let exp = &*((base + dir as usize) as *const IMAGE_EXPORT_DIRECTORY);
     let names = base + exp.AddressOfNames as usize;
     let funcs = base + exp.AddressOfFunctions as usize;
     let ords = base + exp.AddressOfNameOrdinals as usize;
 
     for i in 0..exp.NumberOfNames {
-        let name_rva =
-            *(names.add(i as usize * 4) as *const u32) as usize;
+        let name_rva = *(names.add(i as usize * 4) as *const u32) as usize;
         let name_ptr = base + name_rva;
-        let bytes = core::slice::from_raw_parts(
-            name_ptr as *const u8,
-            export.len(),
-        );
+        let bytes = core::slice::from_raw_parts(name_ptr as *const u8, export.len());
         if bytes == export.as_bytes() {
-            let ord_idx =
-                *(ords.add(i as usize * 2) as *const u16) as usize;
-            let func_rva =
-                *(funcs.add(ord_idx * 4) as *const u32) as usize;
+            let ord_idx = *(ords.add(i as usize * 2) as *const u16) as usize;
+            let func_rva = *(funcs.add(ord_idx * 4) as *const u32) as usize;
             return Ok((base + func_rva) as u64);
         }
     }

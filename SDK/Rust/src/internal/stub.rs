@@ -1,6 +1,5 @@
 //! Manages a ring-buffer of 16-byte-aligned memory stubs, each encoded with runtime encryption
 
-use std::mem::MaybeUninit;
 use std::ptr::write_bytes;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -11,14 +10,17 @@ use windows::Win32::System::Memory::{
 
 use crate::internal::crypto::lea::{lea_decrypt_block, lea_encrypt_block};
 use crate::internal::diagnostics::*;
+use crate::internal::entropy::strong_range_u8_inclusive;
 use crate::internal::stub_template::write_syscall_stub;
-use crate::AbOut;
 pub use crate::internal::stub_template::STUB_SIZE;
+use crate::AbOut;
 
-use once_cell::sync::Lazy;
-
-/// Number of encrypted stubs to maintain in the ring pool.
-const NUM_STUBS: usize = 32;
+/// Opaque handle to a stub slot in the ring allocator.
+///
+/// This prevents non-dispatcher code paths from ever receiving the real stub pointer.
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub(in crate::internal) struct StubHandle(u8);
 
 /// A single encrypted syscall trampoline block.
 ///
@@ -27,11 +29,17 @@ const NUM_STUBS: usize = 32;
 #[derive(Debug)]
 #[repr(C)]
 pub struct StubSlot {
+    /// Base pointer returned by `VirtualAlloc` (must be used for `VirtualFree`).
+    base: *mut u8,
+
     /// Aligned memory block holding the encrypted syscall stub.
-    pub addr: *mut u8,
+    addr: *mut u8,
 
     /// Flag indicating whether this stub is currently encrypted at rest.
-    pub encrypted: AtomicBool,
+    encrypted: AtomicBool,
+
+    /// Flag indicating whether this slot is currently checked out.
+    in_use: AtomicBool,
 }
 
 unsafe impl Send for StubSlot {}
@@ -43,19 +51,15 @@ unsafe impl Sync for StubSlot {}
 /// syscall stubs. Decryption is performed lazily on acquire, and encryption is restored
 /// on release.
 pub struct AbRingAllocator {
-    slots: [StubSlot; NUM_STUBS],
+    slots: Vec<StubSlot>,
     index: AtomicUsize,
 }
 
 unsafe impl Send for AbRingAllocator {}
 unsafe impl Sync for AbRingAllocator {}
 
-pub static G_STUB_POOL: Lazy<AbRingAllocator> = Lazy::new(AbRingAllocator::init);
-
 #[inline(always)]
-pub fn mark_dispatcher_thread() {
-}
-
+pub fn mark_dispatcher_thread() {}
 
 impl AbRingAllocator {
     /// Initializes the stub ring, preallocating and encrypting each RWX stub.
@@ -63,15 +67,19 @@ impl AbRingAllocator {
     /// This is invoked once during dispatcher bootstrap. Each stub is encrypted immediately
     /// after its template is written, and protected with `PAGE_NOACCESS` until acquired.
     pub fn init() -> Self {
-        AbOut!("stub pool init: slots={}, stub_size=0x{:X}", NUM_STUBS, STUB_SIZE);
-        let mut slots: [MaybeUninit<StubSlot>; NUM_STUBS] =
-            std::array::from_fn(|_| MaybeUninit::uninit());
+        let count = strong_range_u8_inclusive(24, 38) as usize;
+        AbOut!(
+            "stub pool init: slots={}, stub_size=0x{:X}",
+            count,
+            STUB_SIZE
+        );
+        let mut slots: Vec<StubSlot> = Vec::with_capacity(count);
 
         let mut min_addr: usize = usize::MAX;
         let mut max_addr: usize = 0;
 
-        for i in 0..NUM_STUBS {
-            let stub = Self::alloc_stub().unwrap();
+        for _ in 0..count {
+            let (base, stub) = Self::alloc_stub().unwrap();
             let stub_addr = stub as usize;
             if stub_addr < min_addr {
                 min_addr = stub_addr;
@@ -91,21 +99,22 @@ impl AbRingAllocator {
                 }
             }
 
-            slots[i] = MaybeUninit::new(StubSlot {
+            slots.push(StubSlot {
+                base,
                 addr: stub,
                 encrypted: AtomicBool::new(true),
+                in_use: AtomicBool::new(false),
             });
         }
 
-        let slots = unsafe { std::mem::transmute::<_, [StubSlot; NUM_STUBS]>(slots) };
-
+        #[cfg(debug_assertions)]
         if min_addr != usize::MAX {
             let range_end = max_addr.saturating_add(STUB_SIZE.saturating_sub(1));
             AbOut!(
                 "stub pool range: 0x{:X}-0x{:X} ({} stubs)",
                 min_addr,
                 range_end,
-                NUM_STUBS
+                count
             );
         }
 
@@ -120,7 +129,7 @@ impl AbRingAllocator {
     ///
     /// Panics if the allocation fails.
     #[inline(always)]
-    fn alloc_stub() -> Result<*mut u8, u32> {
+    fn alloc_stub() -> Result<(*mut u8, *mut u8), u32> {
         let raw = unsafe {
             VirtualAlloc(
                 None,
@@ -128,14 +137,14 @@ impl AbRingAllocator {
                 MEM_COMMIT | MEM_RESERVE,
                 PAGE_EXECUTE_READWRITE,
             )
-        } as usize;
+        } as *mut u8;
 
-        if raw == 0 {
+        if raw.is_null() {
             return Err(ABErr(ABError::StubAllocFail));
         }
 
-        let aligned = (raw + 15) & !15;
-        Ok(aligned as *mut u8)
+        let aligned = ((raw as usize) + 15) & !15;
+        Ok((raw, aligned as *mut u8))
     }
 
     /// Writes the syscall stub template to a newly allocated buffer.
@@ -152,20 +161,32 @@ impl AbRingAllocator {
     /// Returns `None` if no slots are available.
     ///
     /// # Returns
-    /// `Some(*mut u8)` to a decrypted trampoline or `None` if exhausted.
-    pub fn acquire(&self) -> Option<*mut u8> {
-        let start =
-            self.index.fetch_add(1, Ordering::Relaxed) % NUM_STUBS;
+    /// `Some(StubHandle)` for a decrypted trampoline or `None` if exhausted.
+    pub(in crate::internal) fn acquire(&self) -> Option<StubHandle> {
+        let n = self.slots.len();
+        if n == 0 {
+            return None;
+        }
+        let start = self.index.fetch_add(1, Ordering::Relaxed) % n;
 
-        for offset in 0..NUM_STUBS {
-            let i = (start + offset) % NUM_STUBS;
+        for offset in 0..n {
+            let i = (start + offset) % n;
             let slot = &self.slots[i];
+
+            if slot
+                .in_use
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                continue;
+            }
 
             unsafe {
                 #[cfg(feature = "secure")]
                 {
                     let mut old = PAGE_EXECUTE_READ;
-                    VirtualProtect(slot.addr as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old);
+                    let _ =
+                        VirtualProtect(slot.addr as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old);
                 }
 
                 if slot.encrypted.swap(false, Ordering::SeqCst) {
@@ -175,19 +196,24 @@ impl AbRingAllocator {
                 #[cfg(feature = "secure")]
                 {
                     let mut old = PAGE_EXECUTE_READWRITE;
-                    VirtualProtect(
-                        slot.addr as _,
-                        STUB_SIZE,
-                        PAGE_EXECUTE_READ,
-                        &mut old,
-                    );
+                    let _ = VirtualProtect(slot.addr as _, STUB_SIZE, PAGE_EXECUTE_READ, &mut old);
                 }
             }
 
-            return Some(slot.addr);
+            return Some(StubHandle(i as u8));
         }
 
         None
+    }
+
+    /// Resolves an opaque handle to the underlying stub pointer.
+    ///
+    /// This is intentionally restricted to the dispatcher module.
+    #[inline(always)]
+    pub(in crate::internal) unsafe fn resolve_ptr(&self, h: StubHandle) -> *mut u8 {
+        let i = h.0 as usize;
+        debug_assert!(i < self.slots.len());
+        self.slots[i].addr
     }
 
     /// Releases a stub after use, wiping and re-encrypting the region in-place.
@@ -196,35 +222,55 @@ impl AbRingAllocator {
     /// and re-encrypts with LEA. It’s safe to call this multiple times.
     ///
     /// # Arguments
-    /// - `addr`: Pointer to the stub to return
-    pub fn release(&self, addr: *mut u8) {
+    /// - `h`: Handle to the stub to return
+    pub(in crate::internal) fn release(&self, h: StubHandle) {
+        let i = h.0 as usize;
+        debug_assert!(i < self.slots.len());
+        let slot = &self.slots[i];
+        let addr = slot.addr;
+
+        unsafe {
+            #[cfg(feature = "secure")]
+            {
+                let mut old = PAGE_EXECUTE_READ;
+                let _ = VirtualProtect(addr as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old);
+            }
+
+            write_bytes(addr, 0, STUB_SIZE);
+            Self::write_template(addr);
+            lea_encrypt_block(addr, STUB_SIZE);
+
+            #[cfg(feature = "secure")]
+            {
+                let mut old = PAGE_EXECUTE_READWRITE;
+                let _ = VirtualProtect(addr as _, STUB_SIZE, PAGE_NOACCESS, &mut old);
+            }
+        }
+
+        slot.encrypted.store(true, Ordering::SeqCst);
+        slot.in_use.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for AbRingAllocator {
+    fn drop(&mut self) {
         for slot in &self.slots {
-            if slot.addr == addr {
-                unsafe {
-                    #[cfg(feature = "secure")]
-                    {
-                        let mut old = PAGE_EXECUTE_READ;
-                        VirtualProtect(addr as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old);
-                    }
+            unsafe {
+                // Best-effort wipe before freeing. Ignore protection errors.
+                let mut old = PAGE_EXECUTE_READ;
+                let _ = VirtualProtect(slot.addr as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old);
+                write_bytes(slot.addr, 0, STUB_SIZE);
+            }
+        }
 
-                    write_bytes(addr, 0, STUB_SIZE);
-                    Self::write_template(addr);
-                    lea_encrypt_block(addr, STUB_SIZE);
-
-                    #[cfg(feature = "secure")]
-                    {
-                        let mut old = PAGE_EXECUTE_READWRITE;
-                        VirtualProtect(
-                            addr as _,
-                            STUB_SIZE,
-                            PAGE_NOACCESS,
-                            &mut old,
-                        );
-                    }
-                }
-
-                slot.encrypted.store(true, Ordering::SeqCst);
-                break;
+        for slot in &self.slots {
+            unsafe {
+                // Free the original allocation base.
+                let _ = windows::Win32::System::Memory::VirtualFree(
+                    slot.base as _,
+                    0,
+                    windows::Win32::System::Memory::MEM_RELEASE,
+                );
             }
         }
     }

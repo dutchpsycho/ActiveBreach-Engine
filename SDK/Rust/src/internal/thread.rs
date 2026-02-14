@@ -6,17 +6,26 @@
 
 use std::ptr::null_mut;
 
-use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Foundation::{HANDLE, NTSTATUS};
 use windows::Win32::System::Memory::{
     VirtualAlloc, VirtualFree, VirtualProtect, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
     PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
 };
-use windows::Win32::System::Threading::GetCurrentProcess;
 
 use crate::internal::diagnostics::*;
-use crate::internal::stub_template::write_syscall_stub;
-use crate::internal::{dispatch, exports, mapper};
+use crate::internal::stub_template::write_syscall_stub_plain;
+use crate::internal::{dispatch, exports};
+
+#[link(name = "ntdll")]
+extern "system" {
+    fn NtClose(Handle: HANDLE) -> NTSTATUS;
+}
+
+#[inline(always)]
+fn current_process() -> HANDLE {
+    // Under the hood, GetCurrentProcess() is a pseudo-handle: (HANDLE)-1.
+    HANDLE((-1isize) as *mut core::ffi::c_void)
+}
 
 /// Offset of StackBase in the Thread Environment Block (TEB).
 const OFFSET_TEB_STACK_BASE: usize = 0x08;
@@ -45,19 +54,9 @@ const OFFSET_TEB_START_ADDR: usize = 0x1720;
 /// - Stub creation fails.
 /// - The syscall itself returns a non-zero status.
 pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
-    let mut mapped_size = 0;
-    let (mapped_base, _) =
-        mapper::buffer(&mut mapped_size).ok_or_else(|| ABErr(ABError::ThreadFilemapFail))?;
+    exports::ensure_syscall_table_init().map_err(|_| ABErr(ABError::ThreadSyscallInitFail))?;
 
-    if exports::ExSyscalls(mapped_base, mapped_size).is_err() {
-        return Err(ABErr(ABError::ThreadSyscallInitFail));
-    }
-
-    let table =
-        exports::get_syscall_table().ok_or_else(|| ABErr(ABError::ThreadSyscallTableMiss))?;
-
-    let ssn = *table
-        .get("NtCreateThreadEx")
+    let ssn = exports::lookup_ssn("NtCreateThreadEx")
         .ok_or_else(|| ABErr(ABError::ThreadNtCreateMissing))?;
 
     let stub_ptr =
@@ -67,12 +66,12 @@ pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
         return Err(ABErr(ABError::ThreadStubAllocFail));
     }
 
-    write_syscall_stub(stub_ptr, ssn);
+    write_syscall_stub_plain(stub_ptr, ssn);
 
     #[cfg(feature = "secure")]
     {
         let mut old = PAGE_EXECUTE_READWRITE;
-        VirtualProtect(stub_ptr as _, 0x20, PAGE_EXECUTE_READ, &mut old);
+        let _ = VirtualProtect(stub_ptr as _, 0x20, PAGE_EXECUTE_READ, &mut old);
     }
 
     let syscall: unsafe extern "system" fn(
@@ -94,7 +93,7 @@ pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
         &mut thread,
         0x1FFFFF,
         null_mut(),
-        GetCurrentProcess(),
+        current_process(),
         dispatch::thread_proc as *mut _,
         null_mut(),
         0x00000004,
@@ -107,21 +106,17 @@ pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
     #[cfg(feature = "secure")]
     {
         let mut old = PAGE_EXECUTE_READ;
-        VirtualProtect(
-            stub_ptr as _,
-            0x20,
-            PAGE_EXECUTE_READWRITE,
-            &mut old,
-        );
+        let _ = VirtualProtect(stub_ptr as _, 0x20, PAGE_EXECUTE_READWRITE, &mut old);
     }
     std::ptr::write_bytes(stub_ptr, 0x00, 0x20);
-    VirtualFree(stub_ptr as _, 0, MEM_RELEASE);
+    let _ = VirtualFree(stub_ptr as _, 0, MEM_RELEASE);
 
     if status != 0 {
         return Err(ABErr(ABError::ThreadCreateFail));
     }
 
-    CloseHandle(thread);
+    // Under the hood, CloseHandle() => NtClose(). Avoid importing Kernel32.
+    let _ = NtClose(thread);
     Ok(())
 }
 
@@ -168,12 +163,12 @@ pub unsafe fn direct_syscall_stub(
         return None;
     }
 
-    write_syscall_stub(stub, ssn);
+    write_syscall_stub_plain(stub, ssn);
 
     #[cfg(feature = "secure")]
     {
         let mut old = PAGE_EXECUTE_READWRITE;
-        VirtualProtect(stub as _, 0x20, PAGE_EXECUTE_READ, &mut old);
+        let _ = VirtualProtect(stub as _, 0x20, PAGE_EXECUTE_READ, &mut old);
     }
 
     Some(std::mem::transmute(stub))

@@ -2,16 +2,9 @@ use once_cell::sync::{Lazy, OnceCell};
 use std::str;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
-use windows::core::{PCWSTR, Result};
 use windows::Win32::Foundation::HMODULE;
-use windows::Win32::System::Diagnostics::Debug::{
-    IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER, IsDebuggerPresent,
-};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Diagnostics::Debug::{IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER};
 use windows::Win32::System::SystemServices::IMAGE_DOS_HEADER;
-use windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
-#[cfg(all(feature = "secure", not(debug_assertions)))]
-use windows::Win32::System::Threading::ExitProcess;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ViolationType {
@@ -34,13 +27,65 @@ struct ClientId {
     unique_thread: usize,
 }
 
-fn get_current_module_handle() -> Result<HMODULE> {
-    unsafe { GetModuleHandleW(PCWSTR::null()) }
+#[cfg(target_arch = "x86_64")]
+const PEB_IMAGE_BASE_OFFSET: usize = 0x10;
+#[cfg(target_arch = "x86")]
+const PEB_IMAGE_BASE_OFFSET: usize = 0x08;
+
+#[cfg(target_arch = "x86_64")]
+const PEB_BEING_DEBUGGED_OFFSET: usize = 0x02;
+#[cfg(target_arch = "x86")]
+const PEB_BEING_DEBUGGED_OFFSET: usize = 0x02;
+
+#[cfg(target_arch = "x86_64")]
+const TEB_CLIENT_ID_OFFSET: usize = 0x40;
+#[cfg(target_arch = "x86")]
+const TEB_CLIENT_ID_OFFSET: usize = 0x20;
+
+fn read_peb() -> *const u8 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let peb: usize;
+        unsafe {
+            // PEB pointer for x64 lives at GS:[0x60].
+            core::arch::asm!("mov {0}, gs:[0x60]", out(reg) peb);
+        }
+        return peb as *const u8;
+    }
+
+    #[cfg(target_arch = "x86")]
+    {
+        let peb: u32;
+        unsafe {
+            // PEB pointer for x86 lives at FS:[0x30].
+            core::arch::asm!("mov {0:e}, fs:[0x30]", out(reg) peb);
+        }
+        return peb as *const u8;
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+    {
+        core::ptr::null()
+    }
+}
+
+fn get_current_module_handle() -> Option<HMODULE> {
+    let peb = read_peb();
+    if peb.is_null() {
+        return None;
+    }
+
+    let base = unsafe { *(peb.add(PEB_IMAGE_BASE_OFFSET) as *const usize) };
+    if base == 0 {
+        return None;
+    }
+
+    Some(HMODULE(base as *mut core::ffi::c_void))
 }
 
 fn compute_section_range() -> Option<(usize, usize)> {
     unsafe {
-        let module = get_current_module_handle().ok()?;
+        let module = get_current_module_handle()?;
         let base = module.0 as usize;
         let dos = (base as *const IMAGE_DOS_HEADER).as_ref()?;
         if dos.e_magic != 0x5A4D {
@@ -55,15 +100,15 @@ fn compute_section_range() -> Option<(usize, usize)> {
 
         let optional = &nt.OptionalHeader;
         let optional_ptr = optional as *const _ as *const u8;
-        let first_section = optional_ptr
-            .add(nt.FileHeader.SizeOfOptionalHeader as usize)
+        let first_section = optional_ptr.add(nt.FileHeader.SizeOfOptionalHeader as usize)
             as *const IMAGE_SECTION_HEADER;
 
         for i in 0..nt.FileHeader.NumberOfSections as usize {
             let section = first_section.add(i).as_ref()?;
             let name_bytes = &section.Name;
-            let name =
-                str::from_utf8(name_bytes).unwrap_or_default().trim_end_matches(char::from(0));
+            let name = str::from_utf8(name_bytes)
+                .unwrap_or_default()
+                .trim_end_matches(char::from(0));
             if name == ".text" {
                 let start = base + section.VirtualAddress as usize;
                 let end = start + section.Misc.VirtualSize as usize;
@@ -97,17 +142,68 @@ fn check_teb() -> bool {
     if teb.is_null() {
         return false;
     }
-    let client_id = unsafe { *(teb.add(0x40) as *const ClientId) };
-    let (pid, tid) = unsafe { (GetCurrentProcessId(), GetCurrentThreadId()) };
+    let client_id = unsafe { *(teb.add(TEB_CLIENT_ID_OFFSET) as *const ClientId) };
+    let (pid, tid) = current_pid_tid();
     (client_id.unique_process as u32) == pid && (client_id.unique_thread as u32) == tid
 }
 
 fn read_teb() -> *const u8 {
-    let teb: usize;
-    unsafe {
-        core::arch::asm!("mov {0}, gs:[0x30]", out(reg) teb);
+    #[cfg(target_arch = "x86_64")]
+    {
+        let teb: usize;
+        unsafe {
+            // NtCurrentTeb() for x64: TEB pointer is stored at GS:[0x30].
+            core::arch::asm!("mov {0}, gs:[0x30]", out(reg) teb);
+        }
+        return teb as *const u8;
     }
-    teb as *const u8
+
+    #[cfg(target_arch = "x86")]
+    {
+        let teb: u32;
+        unsafe {
+            // NtCurrentTeb() for x86: TEB pointer is stored at FS:[0x18].
+            core::arch::asm!("mov {0:e}, fs:[0x18]", out(reg) teb);
+        }
+        return teb as *const u8;
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+    {
+        core::ptr::null()
+    }
+}
+
+#[inline(always)]
+fn current_pid_tid() -> (u32, u32) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let pid: usize;
+        let tid: usize;
+        unsafe {
+            // TEB.ClientId.UniqueProcess / UniqueThread (no Kernel32 import).
+            core::arch::asm!("mov {0}, gs:[0x40]", out(reg) pid);
+            core::arch::asm!("mov {0}, gs:[0x48]", out(reg) tid);
+        }
+        return (pid as u32, tid as u32);
+    }
+
+    #[cfg(target_arch = "x86")]
+    {
+        let pid: u32;
+        let tid: u32;
+        unsafe {
+            // TEB.ClientId.UniqueProcess / UniqueThread on x86.
+            core::arch::asm!("mov {0:e}, fs:[0x20]", out(reg) pid);
+            core::arch::asm!("mov {0:e}, fs:[0x24]", out(reg) tid);
+        }
+        return (pid, tid);
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+    {
+        (0, 0)
+    }
 }
 
 fn find_suspicious_return() -> Option<usize> {
@@ -152,17 +248,33 @@ fn notify_violation(kind: ViolationType) {
 }
 
 fn is_debugger_attached() -> bool {
-    unsafe { IsDebuggerPresent().as_bool() }
+    // Under the hood, IsDebuggerPresent reads PEB.BeingDebugged.
+    let peb = read_peb();
+    if peb.is_null() {
+        return false;
+    }
+    unsafe { *(peb.add(PEB_BEING_DEBUGGED_OFFSET) as *const u8) != 0 }
 }
 
-/// Runs the AntiBreach-style integrity checks and triggers alerts.
+#[inline(never)]
+fn terminate_hard() -> ! {
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+    unsafe {
+        core::arch::asm!("ud2", options(noreturn));
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+    unsafe {
+        core::intrinsics::abort();
+    }
+}
+
 pub fn evaluate() {
     if is_debugger_attached() {
         notify_violation(ViolationType::DebuggerDetected);
         #[cfg(all(feature = "secure", not(debug_assertions)))]
-        unsafe {
-            ExitProcess(0);
-        }
+        terminate_hard();
+        #[cfg(not(all(feature = "secure", not(debug_assertions))))]
         return;
     }
 

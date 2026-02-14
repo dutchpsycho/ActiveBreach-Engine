@@ -3,22 +3,26 @@ use std::fs::File;
 use std::io::Read;
 use std::mem;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::ptr::{self, null_mut};
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::ptr;
 
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HANDLE, NTSTATUS, UNICODE_STRING};
 use windows::Win32::Storage::FileSystem::QueryDosDeviceW;
 use windows::Win32::System::Memory::{
     VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
 };
-use windows::Win32::System::Threading::GetCurrentProcess;
 
 use crate::AbOut;
 
 #[inline(always)]
 fn nt_success(status: NTSTATUS) -> bool {
     status.0 >= 0
+}
+
+#[inline(always)]
+fn current_process() -> HANDLE {
+    // Under the hood, GetCurrentProcess() is a pseudo-handle: (HANDLE)-1.
+    HANDLE((-1isize) as *mut core::ffi::c_void)
 }
 
 #[link(name = "ntdll")]
@@ -33,8 +37,41 @@ extern "system" {
     ) -> NTSTATUS;
 }
 
-static MAPPED_NTDLL_PTR: AtomicPtr<u8> = AtomicPtr::new(null_mut());
-static MAPPED_NTDLL_SIZE: AtomicUsize = AtomicUsize::new(0);
+/// Opaque mapped-image handle (owned). Drops will wipe and `VirtualFree`.
+pub(in crate::internal) struct MappedImage {
+    base: usize,
+    size: usize,
+}
+
+unsafe impl Send for MappedImage {}
+unsafe impl Sync for MappedImage {}
+
+impl MappedImage {
+    #[inline(always)]
+    pub(in crate::internal) fn as_ptr(&self) -> *const u8 {
+        self.base as *const u8
+    }
+
+    #[inline(always)]
+    pub(in crate::internal) fn size(&self) -> usize {
+        self.size
+    }
+}
+
+impl Drop for MappedImage {
+    fn drop(&mut self) {
+        let p = self.base as *mut u8;
+        if p.is_null() || self.size == 0 {
+            return;
+        }
+        unsafe {
+            ptr::write_bytes(p, 0, self.size);
+            let _ = VirtualFree(p as _, 0, MEM_RELEASE);
+        }
+        self.base = 0;
+        self.size = 0;
+    }
+}
 
 #[repr(C)]
 struct MEMORY_BASIC_INFORMATION64 {
@@ -64,7 +101,6 @@ unsafe fn nt_device_path_to_dos_path(nt_path: &str) -> Option<String> {
         let mut buf = vec![0u16; 1024];
 
         let len = QueryDosDeviceW(PCWSTR(drive_w.as_ptr()), Some(buf.as_mut_slice()));
-
         if len == 0 {
             continue;
         }
@@ -92,7 +128,7 @@ unsafe fn nt_device_path_to_dos_path(nt_path: &str) -> Option<String> {
 }
 
 unsafe fn get_ntdll_base_via_its_own_export() -> Option<*mut u8> {
-    let process = GetCurrentProcess();
+    let process = current_process();
     let addr = NtQueryVirtualMemory as *const () as *const core::ffi::c_void;
 
     let mut mbi: MEMORY_BASIC_INFORMATION64 = mem::zeroed();
@@ -115,10 +151,10 @@ unsafe fn get_ntdll_base_via_its_own_export() -> Option<*mut u8> {
 }
 
 unsafe fn get_module_path_from_base_ntqvm(base: *mut u8) -> Option<String> {
-    let process = GetCurrentProcess();
+    let process = current_process();
     let mut ret_len = 0usize;
 
-    NtQueryVirtualMemory(
+    let _ = NtQueryVirtualMemory(
         process,
         base as _,
         MemorySectionName,
@@ -153,7 +189,6 @@ unsafe fn get_module_path_from_base_ntqvm(base: *mut u8) -> Option<String> {
     }
 
     let wide = std::slice::from_raw_parts(us.Buffer.0, (us.Length / 2) as usize);
-
     let nt_path = OsString::from_wide(wide).to_string_lossy().to_string();
 
     nt_device_path_to_dos_path(&nt_path).or(Some(nt_path))
@@ -163,7 +198,7 @@ pub unsafe fn resolve_ntdll_base_no_strings() -> *mut u8 {
     get_ntdll_base_via_its_own_export().unwrap_or(ptr::null_mut())
 }
 
-pub unsafe fn buffer(size_out: &mut usize) -> Option<(*const u8, HANDLE)> {
+pub(in crate::internal) unsafe fn map_ntdll_image() -> Option<MappedImage> {
     let base = resolve_ntdll_base_no_strings();
     if base.is_null() {
         return None;
@@ -177,26 +212,14 @@ pub unsafe fn buffer(size_out: &mut usize) -> Option<(*const u8, HANDLE)> {
     file.read_to_end(&mut buf).ok()?;
 
     let alloc = VirtualAlloc(None, buf.len(), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) as *mut u8;
-
     if alloc.is_null() {
         return None;
     }
 
     ptr::copy_nonoverlapping(buf.as_ptr(), alloc, buf.len());
-    *size_out = buf.len();
 
-    MAPPED_NTDLL_PTR.store(alloc, Ordering::SeqCst);
-    MAPPED_NTDLL_SIZE.store(buf.len(), Ordering::SeqCst);
-
-    Some((alloc as *const u8, HANDLE(null_mut())))
-}
-
-pub unsafe fn drop_ntdll() {
-    let ptr = MAPPED_NTDLL_PTR.swap(null_mut(), Ordering::SeqCst);
-    let size = MAPPED_NTDLL_SIZE.swap(0, Ordering::SeqCst);
-
-    if !ptr.is_null() {
-        ptr::write_bytes(ptr, 0, size);
-        VirtualFree(ptr as _, 0, MEM_RELEASE);
-    }
+    Some(MappedImage {
+        base: alloc as usize,
+        size: buf.len(),
+    })
 }

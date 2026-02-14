@@ -31,30 +31,17 @@
 //! This program uses unsafe NT API calls and raw pointers but is isolated in test context.
 //! All handles are either self handles or ephemeral.
 
-use std::{
-    ptr::null_mut,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
-    },
-    thread,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use winapi::{
     shared::{
         minwindef::{DWORD, LPVOID, ULONG},
         ntdef::{BOOLEAN, HANDLE},
     },
-    um::{
-        processthreadsapi::{GetCurrentThreadId, OpenThread},
-        winnt::{DLL_PROCESS_ATTACH, THREAD_ALL_ACCESS},
-    },
+    um::winnt::DLL_PROCESS_ATTACH,
 };
 
 use activebreach::{ab_call, activebreach_launch};
-
-use winapi::shared::ntdef::OBJECT_ATTRIBUTES;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Direct NT syscall FFI declarations (ntdll.dll)
@@ -134,14 +121,6 @@ extern "system" fn tls_callback(_: LPVOID, reason: DWORD, _: LPVOID) {
             let _ = activebreach_launch();
         }
     }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// CLIENT_ID struct for NtOpenThread
-#[repr(C)]
-struct CLIENT_ID {
-    UniqueProcess: LPVOID,
-    UniqueThread: LPVOID,
 }
 
 ////////////////////////////////////////////////////////////////////////////////

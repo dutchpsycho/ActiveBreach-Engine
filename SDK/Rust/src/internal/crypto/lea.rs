@@ -229,7 +229,7 @@ pub fn lea_decrypt_block(ptr: *mut u8, len: usize) {
     cipher.decrypt_blocks(ptr, len);
 }
 
-/// Pads & encrypts a UTF-8 string into a heap-backed Vec<u8>.
+/// Pads & encrypts a UTF-8 string into a heap-backed `Vec<u8>`.
 pub fn lea_encrypt_str(input: &str, key: &[u8; 16]) -> Vec<u8> {
     let cipher = LEA128::new(key);
 

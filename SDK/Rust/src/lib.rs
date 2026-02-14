@@ -33,7 +33,7 @@
  *   - Modifications must be clearly documented.
  *   - This software is provided "as-is" without warranties of any kind.
  *
- *  Full License: https://creativecommons.org/licenses/by-nc/4.0/
+ *  Full License: <https://creativecommons.org/licenses/by-nc/4.0/>
  * ==================================================================================
  */
 
@@ -47,10 +47,9 @@ pub mod internal;
 
 pub use internal::antibreach::{ViolationHandler, ViolationType};
 
-use core::ffi::c_void;
 use crate::internal::diagnostics::*;
 use crate::internal::dispatch::{__ActiveBreachFire, G_OPFRAME, G_READY};
-use crate::internal::exports::SYSCALL_TABLE;
+use core::ffi::c_void;
 
 use windows::Win32::System::Threading::{WaitOnAddress, WakeByAddressSingle, INFINITE};
 
@@ -71,6 +70,14 @@ pub fn ab_set_violation_handler(handler: ViolationHandler) {
 /// Clears the currently registered violation handler.
 pub fn ab_clear_violation_handler() {
     internal::antibreach::clear_violation_handler();
+}
+
+/// Sets the long-sleep idle timeout in milliseconds (default: 30_000ms).
+///
+/// Only has effect when built with `--features long_sleep`.
+#[cfg(feature = "long_sleep")]
+pub fn ab_set_long_sleep_idle_ms(ms: u64) {
+    internal::dispatch::ab_set_long_sleep_idle_ms(ms);
 }
 
 /// Launches the ActiveBreach syscall dispatcher thread and loads the syscall table.
@@ -101,7 +108,7 @@ pub unsafe fn activebreach_launch() -> Result<(), u32> {
 
 /// Issues a native system call via ActiveBreach by syscall name and arguments.
 ///
-/// This queues a call into the global [`ABOpFrame`] and blocks until completion.
+/// This queues a call into the global `ABOpFrame` and blocks until completion.
 /// The actual syscall is issued via a custom RWX trampoline stub in memory,
 /// with runtime encryption/decryption of stub memory for stealth.
 ///

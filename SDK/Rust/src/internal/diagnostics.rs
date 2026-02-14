@@ -115,6 +115,34 @@ pub fn ABErr(kind: ABError) -> u32 {
 
     #[cfg(not(debug_assertions))]
     {
+        let _ = kind;
+        0
+    }
+}
+
+#[cfg(debug_assertions)]
+#[inline(always)]
+pub(crate) fn ab_current_tid() -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let tid: usize;
+        unsafe {
+            core::arch::asm!("mov {0}, gs:[0x48]", out(reg) tid);
+        }
+        return tid as u32;
+    }
+
+    #[cfg(target_arch = "x86")]
+    {
+        let tid: u32;
+        unsafe {
+            core::arch::asm!("mov {0:e}, fs:[0x24]", out(reg) tid);
+        }
+        return tid;
+    }
+
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "x86")))]
+    {
         0
     }
 }
@@ -127,11 +155,10 @@ macro_rules! AbOut {
             use std::ffi::CString;
             use windows::core::PCSTR;
             use windows::Win32::System::Diagnostics::Debug::OutputDebugStringA;
-            use windows::Win32::System::Threading::GetCurrentThreadId;
 
             let module_path = module_path!();
             let tag = module_path.split("::").last().unwrap_or("UNKNOWN");
-            let tid = unsafe { GetCurrentThreadId() };
+            let tid = crate::internal::diagnostics::ab_current_tid();
 
             let msg = format!(
                 "[AB:{}][TID:{}] {}",
