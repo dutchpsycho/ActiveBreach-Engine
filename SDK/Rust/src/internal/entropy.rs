@@ -127,16 +127,16 @@ fn strong_fill(buf: &mut [u8]) {
 }
 
 #[inline(always)]
-pub fn strong_u32() -> u32 {
+pub fn AbStrongU32() -> u32 {
     let mut b = [0u8; 4];
     strong_fill(&mut b);
     u32::from_le_bytes(b)
 }
 
 #[inline(always)]
-pub fn strong_range_u8_inclusive(min: u8, max: u8) -> u8 {
+pub fn AbStrongRangeU8Inclusive(min: u8, max: u8) -> u8 {
     debug_assert!(min <= max);
     let span = (max as u32).wrapping_sub(min as u32) + 1;
-    let v = strong_u32() % span;
+    let v = AbStrongU32() % span;
     (min as u32 + v) as u8
 }

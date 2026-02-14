@@ -46,10 +46,23 @@ See [Usage Overview](./USAGE.md)
 
 ## RUST FEATURE MODES
 
-The Rust SDK ships with two feature modes:
+The Rust SDK ships with the following feature flags:
 
-- `secure` (default): Stub pages are protected at rest with `PAGE_NOACCESS`, and protection is flipped during decrypt/patch/execute. This reduces static exposure of stubs in memory but increases observable memory-protection transitions.
-- `stealth`: Protection flips are disabled to reduce observable `VirtualProtect` activity. Stub pages remain writable/executable in-process, lowering flip noise at the cost of keeping stubs more exposed in memory.
+- `secure` (default): Stub pages are protected at rest with `PAGE_NOACCESS` and protections are flipped during acquire/patch/execute/release. This reduces cleartext stub exposure in memory at the cost of more `VirtualProtect` transitions. This is intended for operators who want to maximize in-process security and want absolute certainty that their syscalls will not be tampered with.
+- `stealth`: Marker feature for "no `secure`". To actually run without protection flips, build with `--no-default-features` (and optionally add `--features stealth` to make the intent explicit). In this mode stub pages remain writable/executable, reducing flip noise but leaving stubs more exposed in memory. This is intended for operators who want to minimize page-flipping visibility
+- `long_sleep`: Enables an idle teardown path in the dispatcher. After a configurable idle interval (default 30_000ms), the dispatcher drops the stub pool and syscall table, then blocks until new work arrives. The public API `ab_set_long_sleep_idle_ms(ms)` is only available with this feature. This is intended for operators developing **long-living** or **LOTL** processes who want to avoid memory-scanners.
+- `ntdll_backend`: Prefer jumping into an intact loaded-`ntdll.dll` syscall prologue (inside `ntdll` `.text`) instead of issuing `syscall` from the ActiveBreach stub. If the loaded export stub/prologue is detected as hooked or invalid, the dispatcher falls back to the direct-syscall stub. Stack spoofing is disabled in this backend (no synthetic return chain is constructed). This is intended for operators who want minimal EDR foresnsics and are operating in a heavily instrumented environment.
+
+Example builds:
+
+- Default (recommended baseline):
+  - `cargo build`
+- Stealth-ish (no `secure` protection flips):
+  - `cargo build --no-default-features --features stealth`
+- Long-idle friendly:
+  - `cargo build --features long_sleep`
+- Prefer loaded-NTDLL prologues when intact:
+  - `cargo build --features ntdll_backend`
 
 ## Disclaimer
 

@@ -8,9 +8,13 @@ use std::ptr;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HANDLE, NTSTATUS, UNICODE_STRING};
 use windows::Win32::Storage::FileSystem::QueryDosDeviceW;
+#[cfg(feature = "ntdll_backend")]
+use windows::Win32::System::Diagnostics::Debug::{IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER};
 use windows::Win32::System::Memory::{
-    VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
+    MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE,
 };
+#[cfg(feature = "ntdll_backend")]
+use windows::Win32::System::SystemServices::IMAGE_DOS_HEADER;
 
 use crate::AbOut;
 
@@ -39,8 +43,7 @@ extern "system" {
 
 /// Opaque mapped-image handle (owned). Drops will wipe and `VirtualFree`.
 pub(in crate::internal) struct MappedImage {
-    base: usize,
-    size: usize,
+    buf: Vec<u8>,
 }
 
 unsafe impl Send for MappedImage {}
@@ -49,27 +52,22 @@ unsafe impl Sync for MappedImage {}
 impl MappedImage {
     #[inline(always)]
     pub(in crate::internal) fn as_ptr(&self) -> *const u8 {
-        self.base as *const u8
+        self.buf.as_ptr()
     }
 
     #[inline(always)]
     pub(in crate::internal) fn size(&self) -> usize {
-        self.size
+        self.buf.len()
     }
 }
 
 impl Drop for MappedImage {
     fn drop(&mut self) {
-        let p = self.base as *mut u8;
-        if p.is_null() || self.size == 0 {
+        if self.buf.is_empty() {
             return;
         }
-        unsafe {
-            ptr::write_bytes(p, 0, self.size);
-            let _ = VirtualFree(p as _, 0, MEM_RELEASE);
-        }
-        self.base = 0;
-        self.size = 0;
+        // Best-effort wipe. The allocator will free as part of Vec drop.
+        unsafe { ptr::write_bytes(self.buf.as_mut_ptr(), 0, self.buf.len()) };
     }
 }
 
@@ -198,6 +196,40 @@ pub unsafe fn resolve_ntdll_base_no_strings() -> *mut u8 {
     get_ntdll_base_via_its_own_export().unwrap_or(ptr::null_mut())
 }
 
+#[cfg(feature = "ntdll_backend")]
+pub(in crate::internal) unsafe fn loaded_ntdll_text_range() -> Option<(*const u8, usize)> {
+    let base = resolve_ntdll_base_no_strings() as usize;
+    if base == 0 {
+        return None;
+    }
+
+    let dos = &*(base as *const IMAGE_DOS_HEADER);
+    if dos.e_magic != 0x5A4D {
+        return None;
+    }
+
+    let nt = &*((base + dos.e_lfanew as usize) as *const IMAGE_NT_HEADERS64);
+    if nt.Signature != 0x0000_4550 {
+        return None;
+    }
+
+    let num_secs = nt.FileHeader.NumberOfSections as usize;
+    let sec_ptr = (nt as *const _ as usize + core::mem::size_of::<IMAGE_NT_HEADERS64>())
+        as *const IMAGE_SECTION_HEADER;
+    let secs = core::slice::from_raw_parts(sec_ptr, num_secs);
+
+    for s in secs {
+        // IMAGE_SECTION_HEADER.Name is an 8-byte, NUL-padded ANSI string.
+        if s.Name[..5] == [b'.', b't', b'e', b'x', b't'] {
+            let start = base + s.VirtualAddress as usize;
+            let size = unsafe { s.Misc.VirtualSize as usize };
+            return Some((start as *const u8, size));
+        }
+    }
+
+    None
+}
+
 pub(in crate::internal) unsafe fn map_ntdll_image() -> Option<MappedImage> {
     let base = resolve_ntdll_base_no_strings();
     if base.is_null() {
@@ -210,16 +242,7 @@ pub(in crate::internal) unsafe fn map_ntdll_image() -> Option<MappedImage> {
     let mut file = File::open(&path).ok()?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).ok()?;
-
-    let alloc = VirtualAlloc(None, buf.len(), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) as *mut u8;
-    if alloc.is_null() {
-        return None;
-    }
-
-    ptr::copy_nonoverlapping(buf.as_ptr(), alloc, buf.len());
-
-    Some(MappedImage {
-        base: alloc as usize,
-        size: buf.len(),
-    })
+    // Keep the image in a plain Vec. Avoid using VirtualAlloc/VirtualFree during init.
+    let _ = (MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE); // keep constants referenced for callers
+    Some(MappedImage { buf })
 }

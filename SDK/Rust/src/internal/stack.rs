@@ -8,10 +8,12 @@ use windows::Win32::Foundation::UNICODE_STRING;
 use windows::Win32::System::Diagnostics::Debug::{
     IMAGE_DIRECTORY_ENTRY_EXPORT, IMAGE_NT_HEADERS64,
 };
-use windows::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
+#[cfg(not(feature = "ntdll_backend"))]
+use windows::Win32::System::Memory::{PAGE_READWRITE};
 use windows::Win32::System::SystemServices::{IMAGE_DOS_HEADER, IMAGE_EXPORT_DIRECTORY};
 
 /// Total size of each synthetic stack page, per thread (in bytes).
+#[cfg(not(feature = "ntdll_backend"))]
 const SW_STACK_SIZE: usize = 0x1000;
 
 #[repr(C)]
@@ -155,10 +157,19 @@ unsafe fn get_module_base_peb(module: &str) -> Option<usize> {
     None
 }
 
+/// PEB-based module base lookup (no WinAPI / no IAT).
+///
+/// This is intentionally exposed for internal modules that must avoid API imports.
+pub fn AbGetModuleBasePeb(module: &str) -> Option<usize> {
+    unsafe { get_module_base_peb(module) }
+}
+
 /// Type alias for base pointer to allocated fake stack.
+#[cfg(not(feature = "ntdll_backend"))]
 type StackBase = *mut u64;
 
 // Thread-local synthetic stack page used for stack spoofing.
+#[cfg(not(feature = "ntdll_backend"))]
 thread_local! {
     static SW_PAGE: std::cell::RefCell<Option<StackBase>> =
         std::cell::RefCell::new(None);
@@ -172,7 +183,8 @@ thread_local! {
 ///
 /// # Returns
 /// `Ok(())` on success, or `Err(&'static str)` if initialization fails.
-pub unsafe fn SidewinderInit() -> Result<(), &'static str> {
+#[cfg(not(feature = "ntdll_backend"))]
+pub unsafe fn AbSidewinderInit() -> Result<(), &'static str> {
     get_module_base_peb("NTDLL.DLL").ok_or("NTDLL.DLL not loaded")?;
     Ok(())
 }
@@ -181,18 +193,14 @@ pub unsafe fn SidewinderInit() -> Result<(), &'static str> {
 ///
 /// # Safety
 /// Relies on correct memory layout and page commit by VirtualAlloc.
-unsafe fn _SwGetPage() -> Option<StackBase> {
+#[cfg(not(feature = "ntdll_backend"))]
+unsafe fn sw_get_page() -> Option<StackBase> {
     SW_PAGE.with(|cell| {
         let mut page = cell.borrow_mut();
         if let Some(ptr) = *page {
             Some(ptr)
         } else {
-            let p = VirtualAlloc(
-                None,
-                SW_STACK_SIZE,
-                MEM_COMMIT | MEM_RESERVE,
-                PAGE_READWRITE,
-            ) as StackBase;
+            let p = crate::internal::vm::AbVirtualAlloc(SW_STACK_SIZE, PAGE_READWRITE.0) as StackBase;
             if p.is_null() {
                 return None;
             }
@@ -210,8 +218,9 @@ unsafe fn _SwGetPage() -> Option<StackBase> {
 ///
 /// # Returns
 /// A pointer (`usize`) to the base of the fake stack (SP value).
+#[cfg(not(feature = "ntdll_backend"))]
 pub fn AbStackWinder(nt_stub: u64) -> Option<usize> {
-    let base = unsafe { _SwGetPage()? };
+    let base = unsafe { sw_get_page()? };
     let top = unsafe { ((base.add(SW_STACK_SIZE / 8) as usize) & !0xF) as *mut u64 };
     // Reserve headroom so shadow space + 12 stack args (16-arg ABI) stay inside the page.
     const CALL_HEADROOM: isize = 0x80;
@@ -228,13 +237,13 @@ pub fn AbStackWinder(nt_stub: u64) -> Option<usize> {
 }
 
 /// Resolves the export stub address for a given NT syscall inside loaded `ntdll.dll`.
-pub fn resolve_ntdll_stub(nt_name: &str) -> Option<u64> {
+pub fn AbResolveNtdllStub(nt_name: &str) -> Option<u64> {
     let norm = normalize_sys_name(nt_name);
-    unsafe { _SwResExp("NTDLL.DLL", norm.as_ref()).ok() }
+    unsafe { sw_res_exp("NTDLL.DLL", norm.as_ref()).ok() }
 }
 
-#[cfg(debug_assertions)]
-pub fn debug_fake_stack_bounds() -> Option<(usize, usize)> {
+#[cfg(all(debug_assertions, not(feature = "ntdll_backend")))]
+pub fn AbDebugFakeStackBounds() -> Option<(usize, usize)> {
     SW_PAGE.with(|cell| {
         let base = match *cell.borrow() {
             Some(p) => p,
@@ -245,8 +254,8 @@ pub fn debug_fake_stack_bounds() -> Option<(usize, usize)> {
     })
 }
 
-#[cfg(debug_assertions)]
-pub fn debug_ntdll_image_range() -> Option<(usize, usize)> {
+#[cfg(all(debug_assertions, not(feature = "ntdll_backend")))]
+pub fn AbDebugNtdllImageRange() -> Option<(usize, usize)> {
     unsafe {
         let base = get_module_base_peb("NTDLL.DLL")?;
 
@@ -286,7 +295,7 @@ fn normalize_sys_name(name: &str) -> Cow<'_, str> {
 ///
 /// # Returns
 /// Absolute address of the export as `u64`, or error.
-unsafe fn _SwResExp(module: &str, export: &str) -> Result<u64, &'static str> {
+unsafe fn sw_res_exp(module: &str, export: &str) -> Result<u64, &'static str> {
     let base = get_module_base_peb(module).ok_or("module not loaded")?;
 
     let dos = &*(base as *const IMAGE_DOS_HEADER);

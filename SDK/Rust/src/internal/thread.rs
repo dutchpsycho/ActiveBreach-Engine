@@ -7,19 +7,10 @@
 use std::ptr::null_mut;
 
 use windows::Win32::Foundation::{HANDLE, NTSTATUS};
-use windows::Win32::System::Memory::{
-    VirtualAlloc, VirtualFree, VirtualProtect, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
-    PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
-};
 
 use crate::internal::diagnostics::*;
-use crate::internal::stub_template::write_syscall_stub_plain;
 use crate::internal::{dispatch, exports};
-
-#[link(name = "ntdll")]
-extern "system" {
-    fn NtClose(Handle: HANDLE) -> NTSTATUS;
-}
+use crate::internal::vm;
 
 #[inline(always)]
 fn current_process() -> HANDLE {
@@ -53,28 +44,13 @@ const OFFSET_TEB_START_ADDR: usize = 0x1720;
 /// - `NtCreateThreadEx` entry is not found.
 /// - Stub creation fails.
 /// - The syscall itself returns a non-zero status.
-pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
-    exports::ensure_syscall_table_init().map_err(|_| ABErr(ABError::ThreadSyscallInitFail))?;
+pub unsafe fn AbSpawnActiveBreachThread() -> Result<(), u32> {
+    exports::AbEnsureSyscallTableInit().map_err(|_| AbErr(ABError::ThreadSyscallInitFail))?;
 
-    let ssn = exports::lookup_ssn("NtCreateThreadEx")
-        .ok_or_else(|| ABErr(ABError::ThreadNtCreateMissing))?;
+    let pro = vm::AbResolveNtdllSyscallPrologue("NtCreateThreadEx")
+        .ok_or_else(|| AbErr(ABError::ThreadNtCreateMissing))?;
 
-    let stub_ptr =
-        VirtualAlloc(None, 0x20, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) as *mut u8;
-
-    if stub_ptr.is_null() {
-        return Err(ABErr(ABError::ThreadStubAllocFail));
-    }
-
-    write_syscall_stub_plain(stub_ptr, ssn);
-
-    #[cfg(feature = "secure")]
-    {
-        let mut old = PAGE_EXECUTE_READWRITE;
-        let _ = VirtualProtect(stub_ptr as _, 0x20, PAGE_EXECUTE_READ, &mut old);
-    }
-
-    let syscall: unsafe extern "system" fn(
+    let nt_create_thread_ex: unsafe extern "system" fn(
         *mut HANDLE,
         u32,
         *mut u8,
@@ -86,10 +62,10 @@ pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
         usize,
         usize,
         *mut u8,
-    ) -> i32 = std::mem::transmute(stub_ptr);
+    ) -> NTSTATUS = std::mem::transmute(pro as *const u8);
 
     let mut thread: HANDLE = HANDLE(null_mut());
-    let status = syscall(
+    let status = nt_create_thread_ex(
         &mut thread,
         0x1FFFFF,
         null_mut(),
@@ -103,20 +79,13 @@ pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
         null_mut(),
     );
 
-    #[cfg(feature = "secure")]
-    {
-        let mut old = PAGE_EXECUTE_READ;
-        let _ = VirtualProtect(stub_ptr as _, 0x20, PAGE_EXECUTE_READWRITE, &mut old);
-    }
-    std::ptr::write_bytes(stub_ptr, 0x00, 0x20);
-    let _ = VirtualFree(stub_ptr as _, 0, MEM_RELEASE);
-
-    if status != 0 {
-        return Err(ABErr(ABError::ThreadCreateFail));
+    if status.0 != 0 {
+        return Err(AbErr(ABError::ThreadCreateFail));
     }
 
-    // Under the hood, CloseHandle() => NtClose(). Avoid importing Kernel32.
-    let _ = NtClose(thread);
+    // Intentionally do not close the returned thread HANDLE here. This avoids introducing
+    // a close-call dependency at launch time. If the caller needs the handle, expose it at
+    // the API boundary and close it there.
     Ok(())
 }
 
@@ -139,7 +108,7 @@ pub unsafe fn _SpawnActiveBreachThread() -> Result<(), u32> {
 /// # Returns
 /// - `Some(fn)` if allocation and copy succeed.
 /// - `None` if `VirtualAlloc` fails.
-pub unsafe fn direct_syscall_stub(
+pub unsafe fn AbDirectSyscallStub(
     ssn: u32,
 ) -> Option<
     unsafe extern "system" fn(
@@ -157,18 +126,23 @@ pub unsafe fn direct_syscall_stub(
     ) -> NTSTATUS,
 > {
     let stub =
-        VirtualAlloc(None, 0x20, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE) as *mut u8;
+        vm::AbVirtualAlloc(0x20, windows::Win32::System::Memory::PAGE_EXECUTE_READWRITE.0);
 
     if stub.is_null() {
         return None;
     }
 
-    write_syscall_stub_plain(stub, ssn);
+    crate::internal::stub_template::write_syscall_stub_plain(stub, ssn);
 
     #[cfg(feature = "secure")]
     {
-        let mut old = PAGE_EXECUTE_READWRITE;
-        let _ = VirtualProtect(stub as _, 0x20, PAGE_EXECUTE_READ, &mut old);
+        let mut old: u32 = windows::Win32::System::Memory::PAGE_EXECUTE_READWRITE.0;
+        let _ = vm::AbVirtualProtect(
+            stub,
+            0x20,
+            windows::Win32::System::Memory::PAGE_EXECUTE_READ.0,
+            &mut old,
+        );
     }
 
     Some(std::mem::transmute(stub))

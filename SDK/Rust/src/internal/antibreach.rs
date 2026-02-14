@@ -269,7 +269,7 @@ fn terminate_hard() -> ! {
     }
 }
 
-pub fn evaluate() {
+pub fn AbEvaluate() {
     if is_debugger_attached() {
         notify_violation(ViolationType::DebuggerDetected);
         #[cfg(all(feature = "secure", not(debug_assertions)))]
@@ -289,18 +289,18 @@ pub fn evaluate() {
 }
 
 /// Registers a violation handler that will be invoked every time a violation fires.
-pub fn register_violation_handler(handler: ViolationHandler) {
+pub fn AbRegisterViolationHandler(handler: ViolationHandler) {
     let mut guard = VIOLATION_HANDLER.lock().unwrap();
     *guard = Some(handler);
 }
 
 /// Clears the registered violation handler.
-pub fn clear_violation_handler() {
+pub fn AbClearViolationHandler() {
     let mut guard = VIOLATION_HANDLER.lock().unwrap();
     *guard = None;
 }
 
 /// Returns the number of times a violation was detected.
-pub fn violation_count() -> u32 {
+pub fn AbViolationCount() -> u32 {
     VIOLATION_COUNT.load(Ordering::Relaxed)
 }

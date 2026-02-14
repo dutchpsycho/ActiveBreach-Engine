@@ -76,12 +76,24 @@ fn main() {
     // ret
     plain_plain[10] = 0xC3;
 
+    let mut plain_jmp64 = [0xCCu8; 32];
+    // mov r11, imm64 (target)
+    plain_jmp64[0] = 0x49;
+    plain_jmp64[1] = 0xBB;
+    // 2..=9: target placeholder
+    // jmp r11
+    plain_jmp64[10] = 0x41;
+    plain_jmp64[11] = 0xFF;
+    plain_jmp64[12] = 0xE3;
+
     let mut enc_spoof = [0u8; 32];
     let mut enc_plain = [0u8; 32];
+    let mut enc_jmp64 = [0u8; 32];
     for i in 0..32 {
         let mix = (i as u8).wrapping_mul(17).wrapping_add(seed);
         enc_spoof[i] = plain_spoof[i] ^ key[i % 16] ^ mix;
         enc_plain[i] = plain_plain[i] ^ key[i % 16] ^ mix;
+        enc_jmp64[i] = plain_jmp64[i] ^ key[i % 16] ^ mix;
     }
 
     let out_dir = env::var("OUT_DIR").expect("OUT_DIR");
@@ -100,6 +112,15 @@ fn main() {
 
     s.push_str("pub const STUB_TEMPLATE_ENC_PLAIN: [u8; 32] = [");
     for (i, b) in enc_plain.iter().enumerate() {
+        if i != 0 {
+            s.push_str(", ");
+        }
+        s.push_str(&format!("0x{:02X}", b));
+    }
+    s.push_str("];\n");
+
+    s.push_str("pub const STUB_TEMPLATE_ENC_JMP64: [u8; 32] = [");
+    for (i, b) in enc_jmp64.iter().enumerate() {
         if i != 0 {
             s.push_str(", ");
         }

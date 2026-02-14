@@ -3,7 +3,7 @@
 ## Core Techniques Used
 
 1. **Clean ntdll mapping + dynamic SSN extraction**  
-2. **Encrypted ring-buffer of syscall stubs** (LEA cipher, hardware-derived key)  
+2. **Encrypted ring-buffer of syscall stubs** (AES-128-CTR, per-process key)  
 3. **Per-call decryption / SSN patching / re-encryption**  
 4. **Stack spoofing (Sidewinder)** – fake realistic call stacks  
 5. **Usermode-only dispatcher thread** (no kernel objects for sync)  
@@ -58,7 +58,7 @@ Effect:
 - No reliance on the already-loaded (possibly hooked) ntdll.  
 - Works on any Windows build without updating the binary.
 
-### 3. Encrypted Ring-Buffer of Stubs (LEA Cipher)
+### 3. Encrypted Ring-Buffer of Stubs (AES-CTR)
 
 Why encrypt?
 
@@ -67,7 +67,7 @@ Why encrypt?
 
 How it works:
 
-- Preallocates 32 stubs (32 bytes each, 16-byte aligned).  
+- Preallocates a small ring of stubs (size is randomized at init, each stub is 32 bytes, 16-byte aligned).  
 - Each stub starts as the template:
 
   ```asm
@@ -77,17 +77,17 @@ How it works:
   ret
   ```
 
-- Immediately encrypts the entire stub with a lightweight LEA variant (12 rounds, not full crypto strength – speed > security).  
-- Key derived at runtime from CPUID + RDTSC -> unique per process run.  
-- Stubs are protected `PAGE_NOACCESS` when encrypted.
+- Immediately encrypts the entire stub in-place using AES-128-CTR (encryption/decryption are identical XOR operations).  
+- A per-process key is derived best-effort from CPUID + RDTSC (x86/x64).  
+- With the default `secure` feature, stubs are protected `PAGE_NOACCESS` when encrypted at rest.
 
 When a syscall is needed:
 
-- Acquire a slot from the ring -> change protection -> decrypt -> patch correct SSN -> mark executable -> use.
+- Acquire a slot from the ring -> (optional) change protection -> decrypt -> patch -> mark executable -> use.
 
 After use:
 
-- Zero memory -> rewrite template -> re-encrypt -> back to `PAGE_NOACCESS`.
+- Zero memory -> rewrite template -> re-encrypt -> back to `PAGE_NOACCESS` (when `secure` is enabled).
 
 Effect:
 
@@ -121,12 +121,22 @@ How it works:
 - On launch, uses a fresh direct syscall to call `NtCreateThreadEx` and spawn a hidden dispatcher thread.  
 - Caller queues requests into a shared `ABOpFrame` (pure usermode structure).  
 - Dispatcher thread pulls request -> acquires stub -> patches SSN -> sets up spoofed stack -> executes syscall -> returns result.  
-- Synchronization uses `WaitOnAddress` / `WakeByAddressSingle` (usermode atomic wait/wake, no kernel events).
+- Synchronization uses `WaitOnAddress` / `WakeByAddressSingle` plus short timed waits for backoff (no kernel event handles).
 
 Effect:
 
 - Caller thread never directly executes the syscall instruction.  
 - No kernel synchronization objects -> harder to trace.
+
+### Optional Backend: Loaded-NTDLL Prologue Jump (`ntdll_backend`)
+
+When built with `--features ntdll_backend`, the dispatcher can prefer a different execution strategy:
+
+- Resolve and cache an intact loaded-`ntdll.dll` syscall prologue pointer inside `ntdll` `.text`.
+- Patch the stub as a tiny `mov r11, imm64; jmp r11` trampoline to that prologue.
+- If the loaded stub/prologue looks hooked or fails validation, fall back to the direct-syscall stub template (never jump to arbitrary export entry bytes).
+
+This backend disables stack spoofing (no synthetic return chain is constructed), because execution returns naturally from the `ntdll` prologue.
 
 ### 6. Overall Stealth Properties
 
@@ -150,6 +160,6 @@ ActiveBreach combines **all major modern evasion vectors** into a single coheren
 | Suspicious call stack         | Detected               | Sidewinder spoofing                               |
 | Direct syscall from caller    | Detected (context)     | Separate dispatcher thread                        |
 | Hardcoded SSNs                | Breaks on update       | Runtime extraction                                |
-| Timing / long execution       | Possible detection     | Fast LEA, minimal work                            |
+| Timing / long execution       | Possible detection     | Fast AES-CTR + minimal work                       |
 
 This layered approach makes it significantly harder for current-generation EDR to reliably flag the activity without high false positives.

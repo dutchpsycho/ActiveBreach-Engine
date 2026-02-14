@@ -4,14 +4,17 @@ use std::ptr::write_bytes;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use windows::Win32::System::Memory::{
-    VirtualAlloc, VirtualProtect, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READ,
-    PAGE_EXECUTE_READWRITE, PAGE_NOACCESS,
+    MEM_RELEASE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_NOACCESS,
 };
 
-use crate::internal::crypto::lea::{lea_decrypt_block, lea_encrypt_block};
+use crate::internal::crypto::aes_ctr::{AbAesCtrDecryptBlock, AbAesCtrEncryptBlock};
 use crate::internal::diagnostics::*;
-use crate::internal::entropy::strong_range_u8_inclusive;
+use crate::internal::entropy::AbStrongRangeU8Inclusive;
+use crate::internal::vm;
+#[cfg(not(feature = "ntdll_backend"))]
 use crate::internal::stub_template::write_syscall_stub;
+#[cfg(feature = "ntdll_backend")]
+use crate::internal::stub_template::write_jmp64_stub;
 pub use crate::internal::stub_template::STUB_SIZE;
 use crate::AbOut;
 
@@ -59,7 +62,7 @@ unsafe impl Send for AbRingAllocator {}
 unsafe impl Sync for AbRingAllocator {}
 
 #[inline(always)]
-pub fn mark_dispatcher_thread() {}
+pub fn AbMarkDispatcherThread() {}
 
 impl AbRingAllocator {
     /// Initializes the stub ring, preallocating and encrypting each RWX stub.
@@ -67,7 +70,7 @@ impl AbRingAllocator {
     /// This is invoked once during dispatcher bootstrap. Each stub is encrypted immediately
     /// after its template is written, and protected with `PAGE_NOACCESS` until acquired.
     pub fn init() -> Self {
-        let count = strong_range_u8_inclusive(24, 38) as usize;
+        let count = AbStrongRangeU8Inclusive(24, 38) as usize;
         AbOut!(
             "stub pool init: slots={}, stub_size=0x{:X}",
             count,
@@ -89,12 +92,12 @@ impl AbRingAllocator {
             }
             unsafe {
                 Self::write_template(stub);
-                lea_encrypt_block(stub, STUB_SIZE);
+                AbAesCtrEncryptBlock(stub, STUB_SIZE);
 
-                let mut old = PAGE_EXECUTE_READ;
                 #[cfg(feature = "secure")]
                 {
-                    let ok = VirtualProtect(stub as _, STUB_SIZE, PAGE_NOACCESS, &mut old).is_ok();
+                    let mut old: u32 = PAGE_EXECUTE_READ.0;
+                    let ok = vm::AbVirtualProtect(stub, STUB_SIZE, PAGE_NOACCESS.0, &mut old);
                     debug_assert!(ok);
                 }
             }
@@ -130,17 +133,10 @@ impl AbRingAllocator {
     /// Panics if the allocation fails.
     #[inline(always)]
     fn alloc_stub() -> Result<(*mut u8, *mut u8), u32> {
-        let raw = unsafe {
-            VirtualAlloc(
-                None,
-                STUB_SIZE + 16,
-                MEM_COMMIT | MEM_RESERVE,
-                PAGE_EXECUTE_READWRITE,
-            )
-        } as *mut u8;
+        let raw = unsafe { vm::AbVirtualAlloc(STUB_SIZE + 16, PAGE_EXECUTE_READWRITE.0) } as *mut u8;
 
         if raw.is_null() {
-            return Err(ABErr(ABError::StubAllocFail));
+            return Err(AbErr(ABError::StubAllocFail));
         }
 
         let aligned = ((raw as usize) + 15) & !15;
@@ -152,7 +148,15 @@ impl AbRingAllocator {
     /// The stub template is encrypted at build-time and decrypted only when writing.
     #[inline(always)]
     unsafe fn write_template(stub: *mut u8) {
-        write_syscall_stub(stub, 0);
+        #[cfg(not(feature = "ntdll_backend"))]
+        {
+            write_syscall_stub(stub, 0);
+        }
+        #[cfg(feature = "ntdll_backend")]
+        {
+            // Default to null target; dispatcher patches a real prologue target per call.
+            write_jmp64_stub(stub, 0);
+        }
     }
 
     /// Acquires a decrypted syscall stub from the ring.
@@ -181,23 +185,22 @@ impl AbRingAllocator {
                 continue;
             }
 
-            unsafe {
-                #[cfg(feature = "secure")]
-                {
-                    let mut old = PAGE_EXECUTE_READ;
-                    let _ =
-                        VirtualProtect(slot.addr as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old);
-                }
+            #[cfg(feature = "secure")]
+            {
+                let mut old: u32 = PAGE_EXECUTE_READ.0;
+                let _ = unsafe {
+                    vm::AbVirtualProtect(slot.addr, STUB_SIZE, PAGE_EXECUTE_READWRITE.0, &mut old)
+                };
+            }
 
-                if slot.encrypted.swap(false, Ordering::SeqCst) {
-                    lea_decrypt_block(slot.addr, STUB_SIZE);
-                }
+            if slot.encrypted.swap(false, Ordering::SeqCst) {
+                AbAesCtrDecryptBlock(slot.addr, STUB_SIZE);
+            }
 
-                #[cfg(feature = "secure")]
-                {
-                    let mut old = PAGE_EXECUTE_READWRITE;
-                    let _ = VirtualProtect(slot.addr as _, STUB_SIZE, PAGE_EXECUTE_READ, &mut old);
-                }
+            #[cfg(feature = "secure")]
+            {
+                let mut old: u32 = PAGE_EXECUTE_READWRITE.0;
+                let _ = unsafe { vm::AbVirtualProtect(slot.addr, STUB_SIZE, PAGE_EXECUTE_READ.0, &mut old) };
             }
 
             return Some(StubHandle(i as u8));
@@ -232,18 +235,18 @@ impl AbRingAllocator {
         unsafe {
             #[cfg(feature = "secure")]
             {
-                let mut old = PAGE_EXECUTE_READ;
-                let _ = VirtualProtect(addr as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old);
+                let mut old: u32 = PAGE_EXECUTE_READ.0;
+                let _ = vm::AbVirtualProtect(addr, STUB_SIZE, PAGE_EXECUTE_READWRITE.0, &mut old);
             }
 
             write_bytes(addr, 0, STUB_SIZE);
             Self::write_template(addr);
-            lea_encrypt_block(addr, STUB_SIZE);
+            AbAesCtrEncryptBlock(addr, STUB_SIZE);
 
             #[cfg(feature = "secure")]
             {
-                let mut old = PAGE_EXECUTE_READWRITE;
-                let _ = VirtualProtect(addr as _, STUB_SIZE, PAGE_NOACCESS, &mut old);
+                let mut old: u32 = PAGE_EXECUTE_READWRITE.0;
+                let _ = vm::AbVirtualProtect(addr, STUB_SIZE, PAGE_NOACCESS.0, &mut old);
             }
         }
 
@@ -257,8 +260,8 @@ impl Drop for AbRingAllocator {
         for slot in &self.slots {
             unsafe {
                 // Best-effort wipe before freeing. Ignore protection errors.
-                let mut old = PAGE_EXECUTE_READ;
-                let _ = VirtualProtect(slot.addr as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old);
+                let mut old: u32 = PAGE_EXECUTE_READ.0;
+                let _ = vm::AbVirtualProtect(slot.addr, STUB_SIZE, PAGE_EXECUTE_READWRITE.0, &mut old);
                 write_bytes(slot.addr, 0, STUB_SIZE);
             }
         }
@@ -266,11 +269,8 @@ impl Drop for AbRingAllocator {
         for slot in &self.slots {
             unsafe {
                 // Free the original allocation base.
-                let _ = windows::Win32::System::Memory::VirtualFree(
-                    slot.base as _,
-                    0,
-                    windows::Win32::System::Memory::MEM_RELEASE,
-                );
+                let _ = MEM_RELEASE;
+                let _ = vm::AbVirtualFree(slot.base);
             }
         }
     }

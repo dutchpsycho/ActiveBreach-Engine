@@ -2,6 +2,7 @@
 //! Decrypted only when writing into executable memory.
 
 pub const STUB_SIZE: usize = 32;
+pub const STUB_JMP64_TARGET_OFF: usize = 2;
 
 include!(concat!(env!("OUT_DIR"), "/stub_template.rs"));
 
@@ -44,5 +45,21 @@ pub unsafe fn write_syscall_stub_plain(dst: *mut u8, ssn: u32) {
     let mut buf = [0u8; STUB_SIZE];
     decrypt_template(&STUB_TEMPLATE_ENC_PLAIN, &mut buf);
     buf[4..8].copy_from_slice(&ssn.to_le_bytes());
+    std::ptr::copy_nonoverlapping(buf.as_ptr(), dst, STUB_SIZE);
+}
+
+/// Writes a JMP stub into `dst` and patches the 64-bit target immediate.
+///
+/// Layout (x86_64):
+/// - `49 BB <imm64>`: mov r11, imm64
+/// - `41 FF E3`     : jmp r11
+///
+/// # Safety
+/// - `dst` must be writable and have at least `STUB_SIZE` bytes.
+#[inline(always)]
+pub unsafe fn write_jmp64_stub(dst: *mut u8, target: u64) {
+    let mut buf = [0u8; STUB_SIZE];
+    decrypt_template(&STUB_TEMPLATE_ENC_JMP64, &mut buf);
+    buf[STUB_JMP64_TARGET_OFF..STUB_JMP64_TARGET_OFF + 8].copy_from_slice(&target.to_le_bytes());
     std::ptr::copy_nonoverlapping(buf.as_ptr(), dst, STUB_SIZE);
 }

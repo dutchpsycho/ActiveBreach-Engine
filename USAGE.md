@@ -44,6 +44,29 @@ cargo build --release
 ```
 Output: `SDK\Rust\target\{debug,release}\libactivebreach.rlib`.
 
+#### Rust Feature Flags
+Feature flags live in `SDK/Rust/Cargo.toml`:
+
+- `secure` (default): Uses `PAGE_NOACCESS` at rest and protection flips during stub lifecycle.
+- `stealth`: Marker feature for "no `secure`". Use `--no-default-features` to disable `secure`.
+- `long_sleep`: Enables dispatcher idle teardown + blocking wait. Exposes `ab_set_long_sleep_idle_ms(ms)`.
+- `ntdll_backend`: Prefer jumping into intact loaded-NTDLL syscall prologues; falls back to direct stubs if hooked/invalid.
+
+Examples:
+```bash
+# default (secure)
+cargo build
+
+# no protection flips (stealth-ish)
+cargo build --no-default-features --features stealth
+
+# long idle teardown
+cargo build --features long_sleep
+
+# prefer loaded NTDLL prologues
+cargo build --features ntdll_backend
+```
+
 ### Rust Harness (benchmark/tests)
 ```bash
 cd SDK\Rust
@@ -51,6 +74,9 @@ cargo test --test activebreach_harness
 
 # stealth mode
 cargo test --no-default-features --features stealth --test activebreach_harness
+
+# prefer loaded-NTDLL prologues
+cargo test --features ntdll_backend --test activebreach_harness
 ```
 
 ### Konflict Variant (KFD-EDR-Version)
@@ -115,8 +141,19 @@ unsafe {
 }
 ```
 
+If built with `--features long_sleep`, you can configure the idle timeout:
+```rust
+#[cfg(feature = "long_sleep")]
+activebreach::ab_set_long_sleep_idle_ms(60_000);
+```
+
 ## Notes / Limits
 - Syscall names must match exported `Nt*` names (max 63 bytes).
 - Up to 16 arguments per call; the dispatcher enforces that limit and returns an error code if exceeded.
 - `ActiveBreach_launch()` / `activebreach_launch()` must complete before any syscall; failing to initialize returns stub `0`/`NoOpStub`.
 - In C/C++, missing stubs or lookup failures print errors to stderr and return `NoOpStub`; verify `_AbGetStub` results when diagnosing failures.
+
+## Operational Changes (Recent)
+- The Rust global opframe is no longer exposed as a `pub static mut`; it is kept internal and accessed via a small wrapper to reduce misuse.
+- The caller-side wait in `AbFire` uses a hybrid backoff (pause/yield/spin) and a short timed `WaitOnAddress` to avoid burning CPU during long waits.
+- The Rust thread spawner no longer closes the returned thread handle during `activebreach_launch()` to avoid introducing a close-call dependency in that module.

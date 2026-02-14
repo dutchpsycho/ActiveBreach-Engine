@@ -17,20 +17,29 @@
 //! All memory and thread control logic assumes tight control of environment (e.g. AV evasion).
 //! The system assumes this thread is spawned **once** and remains alive for the duration of use.
 
+use core::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use windows::Win32::System::Memory::{VirtualProtect, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE};
+use windows::Win32::System::Memory::{PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE};
 use windows::Win32::System::Threading::{WaitOnAddress, WakeByAddressSingle, INFINITE};
 
 use crate::internal::antibreach;
-use crate::internal::diagnostics::{ABErr, ABError};
+use crate::internal::diagnostics::{AbErr, ABError};
 use crate::internal::exports;
-#[cfg(debug_assertions)]
-use crate::internal::stack::{debug_fake_stack_bounds, debug_ntdll_image_range};
-use crate::internal::stack::{resolve_ntdll_stub, AbStackWinder, SidewinderInit};
+#[cfg(feature = "ntdll_backend")]
+use crate::internal::mapper;
+use crate::internal::vm;
+#[cfg(not(feature = "ntdll_backend"))]
+use crate::internal::stack::AbResolveNtdllStub;
+#[cfg(all(debug_assertions, not(feature = "ntdll_backend")))]
+use crate::internal::stack::{AbDebugFakeStackBounds, AbDebugNtdllImageRange};
+#[cfg(not(feature = "ntdll_backend"))]
+use crate::internal::stack::{AbSidewinderInit, AbStackWinder};
 use crate::internal::stub::{AbRingAllocator, STUB_SIZE};
+#[cfg(feature = "ntdll_backend")]
+use crate::internal::stub_template::{write_jmp64_stub, write_syscall_stub};
 use crate::AbOut;
 /// Operation frame shared between the caller and dispatcher thread.
 ///
@@ -101,21 +110,52 @@ pub type ABStubFn = unsafe extern "system" fn(
     usize,
 ) -> usize;
 
+struct OpFrameGlobal {
+    slot: UnsafeCell<MaybeUninit<ABOpFrame>>,
+}
+
+// Safe because all access is synchronized externally via `status` atomics and the
+// dispatcher is launched exactly once.
+unsafe impl Sync for OpFrameGlobal {}
+
+impl OpFrameGlobal {
+    const fn new() -> Self {
+        Self {
+            slot: UnsafeCell::new(MaybeUninit::uninit()),
+        }
+    }
+
+    /// # Safety
+    /// Must only be called once (by the dispatcher thread) before any readers.
+    #[inline(always)]
+    unsafe fn init(&self) -> *mut ABOpFrame {
+        (*self.slot.get()).write(ABOpFrame::default());
+        (*self.slot.get()).as_mut_ptr()
+    }
+
+    /// # Safety
+    /// Caller must ensure the dispatcher has initialized the frame.
+    #[inline(always)]
+    unsafe fn ptr(&self) -> *mut ABOpFrame {
+        (*self.slot.get()).as_mut_ptr()
+    }
+}
+
 /// Shared global operation frame, uninitialized until dispatcher starts.
-pub static mut G_OPFRAME: MaybeUninit<ABOpFrame> = MaybeUninit::uninit();
+static G_OPFRAME: OpFrameGlobal = OpFrameGlobal::new();
 pub static G_READY: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "long_sleep")]
 static G_LONG_SLEEP_IDLE_MS: AtomicU64 = AtomicU64::new(30_000);
 
 #[cfg(feature = "long_sleep")]
-pub fn ab_set_long_sleep_idle_ms(ms: u64) {
+pub fn AbSetLongSleepIdleMs(ms: u64) {
     // Keep this sane; too low tends to thrash alloc/free and increases risk of races.
     let ms = ms.clamp(1_000, 24 * 60 * 60 * 1000);
     G_LONG_SLEEP_IDLE_MS.store(ms, Ordering::Relaxed);
 }
 
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(feature = "ntdll_backend")))]
 static G_SPOOF_DUMPED: AtomicBool = AtomicBool::new(false);
 
 #[inline(always)]
@@ -175,21 +215,23 @@ fn terminate_hard() -> ! {
 /// It assumes `G_OPFRAME` is uninitialized and will remain in memory.
 ///
 pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
-    crate::internal::stub::mark_dispatcher_thread();
+    crate::internal::stub::AbMarkDispatcherThread();
     AbOut!(
         "dispatcher thread started @ {:p} (TID={})",
         thread_proc as *const (),
         current_tid()
     );
-    G_OPFRAME.write(ABOpFrame::default());
+    let frame = &mut *G_OPFRAME.init();
     G_READY.store(true, Ordering::Release);
     // Ensure any callers waiting via WaitOnAddress get released promptly.
     WakeByAddressSingle(&G_READY as *const AtomicBool as *const core::ffi::c_void);
     AbOut!("opframe initialized, ready flag set");
 
-    let _ = SidewinderInit();
+        #[cfg(not(feature = "ntdll_backend"))]
+        {
+        let _ = AbSidewinderInit();
+        }
 
-    let frame = &mut *G_OPFRAME.as_mut_ptr();
     let mut spin = 0;
 
     let mut stub_pool: Option<AbRingAllocator> = None;
@@ -203,10 +245,10 @@ pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
                 let idle_ms = G_LONG_SLEEP_IDLE_MS.load(Ordering::Relaxed);
                 let idle = Duration::from_millis(idle_ms);
                 if Instant::now().duration_since(last_activity) >= idle {
-                    if stub_pool.is_some() || exports::syscall_table_is_init() {
+                    if stub_pool.is_some() || exports::AbSyscallTableIsInit() {
                         AbOut!("long_sleep idle: tearing down resources");
                         stub_pool = None; // drops + VirtualFree
-                        exports::deinit_syscall_table();
+                        exports::AbDeinitSyscallTable();
                     }
 
                     // Alertable-ish: park until the caller flips status away from 0.
@@ -235,20 +277,20 @@ pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
         }
 
         // Ensure syscall table exists before resolving the SSN.
-        if exports::ensure_syscall_table_init().is_err() {
+        if exports::AbEnsureSyscallTableInit().is_err() {
             AbOut!("syscall table init failed");
-            frame.ret = ABErr(ABError::DispatchTableMissing) as usize;
+            frame.ret = AbErr(ABError::DispatchTableMissing) as usize;
             frame.status.store(2, Ordering::Release);
             continue;
         }
-        if !exports::verify_syscall_table_hash() {
+        if !exports::AbVerifySyscallTableHash() {
             AbOut!("syscall table hash mismatch");
             terminate_hard();
         }
 
         let name_len = frame.name_len as usize;
         if name_len == 0 || name_len >= frame.name.len() {
-            frame.ret = ABErr(ABError::DispatchNameTooLong) as usize;
+            frame.ret = AbErr(ABError::DispatchNameTooLong) as usize;
             frame.status.store(2, Ordering::Release);
             continue;
         }
@@ -256,21 +298,42 @@ pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
         let name = match core::str::from_utf8(name_bytes) {
             Ok(s) => s,
             Err(_) => {
-                frame.ret = ABErr(ABError::DispatchNameTooLong) as usize;
+                frame.ret = AbErr(ABError::DispatchNameTooLong) as usize;
                 frame.status.store(2, Ordering::Release);
                 continue;
             }
         };
 
-        let ssn = match exports::lookup_ssn(name) {
+        #[cfg(feature = "ntdll_backend")]
+        let ssn: u32 = match exports::AbLookupSsn(name) {
             Some(n) => n,
             None => {
-                frame.ret = ABErr(ABError::DispatchSyscallMissing) as usize;
+                frame.ret = AbErr(ABError::DispatchSyscallMissing) as usize;
                 frame.status.store(2, Ordering::Release);
                 continue;
             }
         };
-        frame.syscall_id = ssn;
+
+        #[cfg(not(feature = "ntdll_backend"))]
+        {
+            let ssn = match exports::AbLookupSsn(name) {
+                Some(n) => n,
+                None => {
+                    frame.ret = AbErr(ABError::DispatchSyscallMissing) as usize;
+
+                    frame.status.store(2, Ordering::Release);
+                    continue;
+                }
+            };
+            frame.syscall_id = ssn;
+        }
+
+        #[cfg(feature = "ntdll_backend")]
+        {
+            // Keep syscall_id meaningful for diagnostics. Also used if we fall back to
+            // the direct-syscall stub when NTDLL's export stub is hooked.
+            frame.syscall_id = ssn;
+        }
 
         let pool = stub_pool.get_or_insert_with(AbRingAllocator::init);
 
@@ -290,24 +353,58 @@ pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
             continue;
         }
 
+        #[cfg(not(feature = "ntdll_backend"))]
         let ssn_ptr = stub.add(4) as *mut u32;
 
         #[cfg(feature = "secure")]
         {
-            let mut old = PAGE_EXECUTE_READ;
-            if !VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READWRITE, &mut old).is_ok() {
+            let mut old: u32 = PAGE_EXECUTE_READ.0;
+            if !vm::AbVirtualProtect(stub, STUB_SIZE, PAGE_EXECUTE_READWRITE.0, &mut old) {
                 AbOut!("RWX fail");
                 pool.release(h);
                 continue;
             }
         }
 
-        ssn_ptr.write_volatile(ssn);
+        #[cfg(not(feature = "ntdll_backend"))]
+        ssn_ptr.write_volatile(frame.syscall_id);
+
+        #[cfg(feature = "ntdll_backend")]
+        {
+            // Prefer jumping into a cached loaded-NTDLL syscall prologue pointer.
+            // If no intact prologue exists (inline hook overwrote the stub), fall back to a
+            // direct-syscall stub. Never jump to export entry bytes.
+            if let Some(target) = exports::AbLookupNtdllProloguePtr(name) {
+                // Re-validate the cached prologue pointer is still inside NTDLL .text.
+                // Hooks can be installed after init; if anything looks off, fall back to direct stub.
+                let mut ok = false;
+                unsafe {
+                    if let Some((tbase, tlen)) = mapper::loaded_ntdll_text_range() {
+                        let start = tbase as usize;
+                        if let Some(end) = start.checked_add(tlen) {
+                            let p = target as usize;
+                            // Require a little headroom for reading the minimal prologue window.
+                            if p >= start && p.checked_add(32).is_some_and(|p_end| p_end <= end) {
+                                ok = true;
+                            }
+                        }
+                    }
+                }
+
+                if ok {
+                    unsafe { write_jmp64_stub(stub, target as u64) };
+                } else {
+                    unsafe { write_syscall_stub(stub, ssn) };
+                }
+            } else {
+                unsafe { write_syscall_stub(stub, ssn) };
+            }
+        }
 
         #[cfg(feature = "secure")]
         {
-            let mut old = PAGE_EXECUTE_READWRITE;
-            VirtualProtect(stub as _, STUB_SIZE, PAGE_EXECUTE_READ, &mut old).ok();
+            let mut old: u32 = PAGE_EXECUTE_READWRITE.0;
+            vm::AbVirtualProtect(stub, STUB_SIZE, PAGE_EXECUTE_READ.0, &mut old);
         }
 
         let fn_ptr: ABStubFn = std::mem::transmute(stub);
@@ -315,16 +412,20 @@ pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
         let mut regs = [0usize; 16];
         regs[..frame.arg_count].copy_from_slice(&frame.args[..frame.arg_count]);
 
-        antibreach::evaluate();
+        antibreach::AbEvaluate();
 
+        #[cfg(not(feature = "ntdll_backend"))]
         let mut orig_rsp: usize = 0;
+        #[cfg(not(feature = "ntdll_backend"))]
         let mut spoofed = false;
 
+        // Stack spoofing is only used by the direct-syscall backend.
+        #[cfg(not(feature = "ntdll_backend"))]
         if frame.spoof_ret != 0 {
             if let Some(fake_rsp) = AbStackWinder(frame.spoof_ret as u64) {
                 #[cfg(debug_assertions)]
                 if !G_SPOOF_DUMPED.swap(true, Ordering::SeqCst) {
-                    if let Some((base, end)) = debug_fake_stack_bounds() {
+                    if let Some((base, end)) = AbDebugFakeStackBounds() {
                         if fake_rsp < base || fake_rsp >= end {
                             AbOut!(
                                 "spoof stack OOB: rsp=0x{:X} page=0x{:X}-0x{:X}",
@@ -342,7 +443,7 @@ pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
                         }
                     }
 
-                    if let Some((base, end)) = debug_ntdll_image_range() {
+                    if let Some((base, end)) = AbDebugNtdllImageRange() {
                         let ret = frame.spoof_ret as usize;
                         if ret < base || ret >= end {
                             AbOut!(
@@ -387,6 +488,7 @@ pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
             regs[9], regs[10], regs[11], regs[12], regs[13], regs[14], regs[15],
         );
 
+        #[cfg(not(feature = "ntdll_backend"))]
         if spoofed {
             core::arch::asm!("mov rsp, {}", in(reg) orig_rsp);
         }
@@ -401,19 +503,56 @@ pub unsafe extern "system" fn thread_proc(_: *mut core::ffi::c_void) -> u32 {
 }
 
 #[inline(always)]
-pub unsafe fn __ActiveBreachFire(name: &str, args: &[usize]) -> usize {
-    let frame = &mut *G_OPFRAME.as_mut_ptr();
+pub unsafe fn AbFire(name: &str, args: &[usize]) -> usize {
+    #[inline(always)]
+    fn wait_status_eq(status: &AtomicU32, want: u32, iters_limit: u32) -> bool {
+        let mut spin: u32 = 0;
+        while status.load(Ordering::Acquire) != want {
+            if spin >= iters_limit {
+                return false;
+            }
 
-    let mut spin = 0;
-    while frame.status.load(Ordering::Acquire) != 0 {
-        if spin >= 0x200_0000 {
-            return ABErr(ABError::DispatchFrameTimeout) as usize;
+            match spin {
+                0..=64 => cpu_pause(),
+                65..=256 => std::thread::yield_now(),
+                257..=2048 => std::hint::spin_loop(),
+                _ => {
+                    // Use a short timed wait to avoid burning CPU without relying on external wakes.
+                    let expected: u32 = status.load(Ordering::Relaxed);
+                    unsafe {
+                        let _ = WaitOnAddress(
+                            status as *const AtomicU32 as *const core::ffi::c_void,
+                            &expected as *const u32 as *const core::ffi::c_void,
+                            core::mem::size_of::<u32>(),
+                            Some(1), // ms
+                        );
+                    }
+                }
+            }
+
+            spin = spin.wrapping_add(1);
         }
-        std::hint::spin_loop();
-        spin += 1;
+        true
     }
 
-    frame.spoof_ret = resolve_ntdll_stub(name).unwrap_or(0) as usize;
+    let frame = &mut *G_OPFRAME.ptr();
+
+    if !wait_status_eq(&frame.status, 0, 0x200_0000) {
+        return AbErr(ABError::DispatchFrameTimeout) as usize;
+    }
+
+    // `spoof_ret` is used by the direct-syscall backend to build a synthetic stack that returns
+    // into an NTDLL export stub. With `ntdll_backend`, we explicitly do not spoof the stack: we
+    // JMP into the loaded NTDLL syscall prologue and let it `ret` back naturally.
+    #[cfg(not(feature = "ntdll_backend"))]
+    {
+        frame.spoof_ret = AbResolveNtdllStub(name).unwrap_or(0) as usize;
+
+    }
+    #[cfg(feature = "ntdll_backend")]
+    {
+        frame.spoof_ret = 0;
+    }
 
     // Copy syscall name into the shared frame for dispatcher-side lookup.
     // `ab_call()` already enforces name.len() < 64.
@@ -427,17 +566,13 @@ pub unsafe fn __ActiveBreachFire(name: &str, args: &[usize]) -> usize {
     frame.status.store(1, Ordering::Release);
     WakeByAddressSingle(&frame.status as *const AtomicU32 as *const core::ffi::c_void);
 
-    let mut spin2 = 0;
-    while frame.status.load(Ordering::Acquire) != 2 {
-        if spin2 >= 0x200_0000 {
-            return ABErr(ABError::DispatchFrameTimeout) as usize;
-        }
-        std::hint::spin_loop();
-        spin2 += 1;
+    if !wait_status_eq(&frame.status, 2, 0x200_0000) {
+        return AbErr(ABError::DispatchFrameTimeout) as usize;
     }
 
     let ret = frame.ret;
     frame.status.store(0, Ordering::Release);
+    WakeByAddressSingle(&frame.status as *const AtomicU32 as *const core::ffi::c_void);
 
     ret
 }

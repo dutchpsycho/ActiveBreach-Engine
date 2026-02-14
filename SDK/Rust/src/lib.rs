@@ -1,29 +1,13 @@
 /*!
  * ==================================================================================
- *  Repository:   Syscall Proxy
- *  Project:      ActiveBreach
+ *  Repository:   https://github.com/dutchpsycho/ActiveBreach-Engine
+ *  Project:      ActiveBreach (ABE)
  *  File:         lib.rs
- *  Author:       CrisisEvasion
+ *  Author:       8damon
  *  Organization: TITAN Softwork Solutions
- *  Inspired by:  MDSEC Research
- *
- *  Description:
- *      ActiveBreach is a high-performance syscall proxy framework that enables
- *      indirect invocation of native NT system calls from usermode. It uses a
- *      ring-buffer of preallocated encrypted syscall stubs, dispatched through
- *      a usermode-only shared memory control block (`ABOpFrame`), avoiding all
- *      kernel object synchronization and WinAPI usage.
- *      System service numbers (SSNs) are dynamically extracted from a memory-mapped
- *      copy of `ntdll.dll`, and used to patch per-call trampolines in memory.
- *      Each stub is encrypted at rest using a hardware-derived, runtime-only
- *      LEA cipher variant, obfuscating opcodes and evading static memory scans
- *      (YARA/SIGMA). During execution, stubs are decrypted, the SSN is written,
- *      and the syscall is issued via a minimal inline stub.
- *      The result is a highly stealthy syscall abstraction layer optimized for
- *      evasion, speed, and dynamic reuse without persistent footprint.
  *
  *  License:      “Commons Clause” License Condition v1.0 Apache License
- *  Copyright:    (C) 2025 TITAN Softwork Solutions. All rights reserved.
+ *  Copyright:    (C) 2026 TITAN Softwork Solutions. All rights reserved.
  *
  *  Licensing Terms:
  *  ----------------------------------------------------------------------------------
@@ -48,7 +32,7 @@ pub mod internal;
 pub use internal::antibreach::{ViolationHandler, ViolationType};
 
 use crate::internal::diagnostics::*;
-use crate::internal::dispatch::{__ActiveBreachFire, G_OPFRAME, G_READY};
+use crate::internal::dispatch::{AbFire, G_READY};
 use core::ffi::c_void;
 
 use windows::Win32::System::Threading::{WaitOnAddress, WakeByAddressSingle, INFINITE};
@@ -59,17 +43,17 @@ use std::ptr;
 
 /// Returns the number of AntiBreach-style violations detected by the Rust dispatcher.
 pub fn ab_violation_count() -> u32 {
-    internal::antibreach::violation_count()
+    internal::antibreach::AbViolationCount()
 }
 
 /// Registers a global violation handler that will be invoked on each violation.
 pub fn ab_set_violation_handler(handler: ViolationHandler) {
-    internal::antibreach::register_violation_handler(handler);
+    internal::antibreach::AbRegisterViolationHandler(handler);
 }
 
 /// Clears the currently registered violation handler.
 pub fn ab_clear_violation_handler() {
-    internal::antibreach::clear_violation_handler();
+    internal::antibreach::AbClearViolationHandler();
 }
 
 /// Sets the long-sleep idle timeout in milliseconds (default: 30_000ms).
@@ -77,7 +61,7 @@ pub fn ab_clear_violation_handler() {
 /// Only has effect when built with `--features long_sleep`.
 #[cfg(feature = "long_sleep")]
 pub fn ab_set_long_sleep_idle_ms(ms: u64) {
-    internal::dispatch::ab_set_long_sleep_idle_ms(ms);
+    internal::dispatch::AbSetLongSleepIdleMs(ms);
 }
 
 /// Launches the ActiveBreach syscall dispatcher thread and loads the syscall table.
@@ -103,7 +87,7 @@ pub fn ab_set_long_sleep_idle_ms(ms: u64) {
 /// }
 /// ```
 pub unsafe fn activebreach_launch() -> Result<(), u32> {
-    internal::thread::_SpawnActiveBreachThread()
+    internal::thread::AbSpawnActiveBreachThread()
 }
 
 /// Issues a native system call via ActiveBreach by syscall name and arguments.
@@ -138,11 +122,11 @@ pub unsafe fn activebreach_launch() -> Result<(), u32> {
 /// ```
 pub unsafe fn ab_call(name: &str, args: &[usize]) -> usize {
     if name.len() >= 64 {
-        return ABErr(ABError::DispatchNameTooLong) as usize;
+        return AbErr(ABError::DispatchNameTooLong) as usize;
     }
 
     if args.len() > 16 {
-        return ABErr(ABError::DispatchArgTooMany) as usize;
+        return AbErr(ABError::DispatchArgTooMany) as usize;
     }
 
     while !G_READY.load(std::sync::atomic::Ordering::Acquire) {
@@ -160,5 +144,5 @@ pub unsafe fn ab_call(name: &str, args: &[usize]) -> usize {
         );
     }
 
-    __ActiveBreachFire(name, args)
+    AbFire(name, args)
 }

@@ -1,14 +1,14 @@
 [package]
 name = "activebreach"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-authors = ["TITAN Softwork Solutions"]
-repository = "https://github.com/dutchpsycho/ActiveBreach-Engine"
-homepage = "https://github.com/dutchpsycho/ActiveBreach-Engine"
+authors = ["8damon", "TITAN Softwork Solutions"]
+repository = "https://github.com/8damon/ActiveBreach-Engine"
+homepage = "https://github.com/8damon/ActiveBreach-Engine"
 readme = "README.md"
 license-file = "LICENSE"
-description = "Windows syscall abstraction layer via dynamic syscall proxying with dispatcher coordination"
-keywords = ["syscall", "proxy", "ntdll", "EDR", "ActiveBreach"]
+description = "Highly modular & configurable Syscall-Execuion framework"
+keywords = ["syscall", "indirect_call", "dse", "av", "redteam", "proxy", "ntdll", "EDR", "ActiveBreach"]
 categories = ["os::windows-apis"]
 
 publish = false
@@ -57,6 +57,7 @@ default = ["secure"]
 secure = []
 stealth = []
 long_sleep = []
+ntdll_backend = []
 
 [profile.dev]
 opt-level = 1

@@ -36,6 +36,7 @@ pub enum ABError {
     DispatchNotReady,
     DispatchTableMissing,
     DispatchSyscallMissing,
+    DispatchPrologueMissing,
     DispatchFrameTimeout,
     DispatchStubAllocFail,
     DispatchStubMisaligned,
@@ -87,6 +88,7 @@ pub static ERROR_CODES: Lazy<Mutex<HashMap<ABError, u32>>> = Lazy::new(|| {
         ABError::DispatchNotReady,
         ABError::DispatchTableMissing,
         ABError::DispatchSyscallMissing,
+        ABError::DispatchPrologueMissing,
         ABError::DispatchFrameTimeout,
         ABError::DispatchStubAllocFail,
         ABError::DispatchStubMisaligned,
@@ -103,7 +105,7 @@ pub static ERROR_CODES: Lazy<Mutex<HashMap<ABError, u32>>> = Lazy::new(|| {
 });
 
 #[inline(always)]
-pub fn ABErr(kind: ABError) -> u32 {
+pub fn AbErr(kind: ABError) -> u32 {
     #[cfg(debug_assertions)]
     {
         *ERROR_CODES
@@ -122,7 +124,7 @@ pub fn ABErr(kind: ABError) -> u32 {
 
 #[cfg(debug_assertions)]
 #[inline(always)]
-pub(crate) fn ab_current_tid() -> u32 {
+pub(crate) fn AbCurrentTid() -> u32 {
     #[cfg(target_arch = "x86_64")]
     {
         let tid: usize;
@@ -158,7 +160,7 @@ macro_rules! AbOut {
 
             let module_path = module_path!();
             let tag = module_path.split("::").last().unwrap_or("UNKNOWN");
-            let tid = crate::internal::diagnostics::ab_current_tid();
+            let tid = crate::internal::diagnostics::AbCurrentTid();
 
             let msg = format!(
                 "[AB:{}][TID:{}] {}",

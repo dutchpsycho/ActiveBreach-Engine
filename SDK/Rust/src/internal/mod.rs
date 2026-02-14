@@ -10,3 +10,4 @@ pub mod stack;
 pub mod stub;
 pub mod stub_template;
 pub mod thread;
+pub mod vm;
