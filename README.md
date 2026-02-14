@@ -5,6 +5,8 @@
 ![C++](https://img.shields.io/badge/C%2B%2B-00599C?logo=c%2B%2B&logoColor=white&style=flat)
 ![Rust](https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white&style=flat)
 
+**ActiveBreach-Engine** now has a article detailing it's internals [here](https://titansoftwork.com/blog/activebreach/)
+
 **ActiveBreach-Engine (ABE)** is a Windows execution capability platform designed to support authorized adversary emulation, detection validation, and low-level security research in modern EDR-protected environments.
 
 **ABE** provides a controlled, fully dynamic mechanism for executing Windows system calls without reliance on user-mode API invocation or resident `ntdll.dll` code paths, enabling security teams to evaluate detection coverage, telemetry fidelity, and behavioral assumptions made by modern EDR, XDR, and security monitoring solutions.
