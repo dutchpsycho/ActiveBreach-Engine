@@ -1,16 +1,20 @@
 use once_cell::sync::{Lazy, OnceCell};
+use std::mem::MaybeUninit;
 use std::str;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use windows::Win32::Foundation::HMODULE;
-use windows::Win32::System::Diagnostics::Debug::{IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER};
+use windows::Win32::System::Diagnostics::Debug::{CONTEXT, IMAGE_NT_HEADERS64, IMAGE_SECTION_HEADER};
 use windows::Win32::System::SystemServices::IMAGE_DOS_HEADER;
+
+use crate::internal::stack::AbResolveNtdllStub;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ViolationType {
     TebMismatch,
     SuspiciousCaller,
     DebuggerDetected,
+    HardwareBreakpoint,
 }
 
 pub type ViolationHandler = fn(ViolationType);
@@ -19,6 +23,12 @@ static TEXT_RANGE: OnceCell<(usize, usize)> = OnceCell::new();
 static TEXT_RANGE_FAILED: AtomicBool = AtomicBool::new(false);
 static VIOLATION_COUNT: AtomicU32 = AtomicU32::new(0);
 static VIOLATION_HANDLER: Lazy<Mutex<Option<ViolationHandler>>> = Lazy::new(|| Mutex::new(None));
+static RTL_CAPTURE_CONTEXT: OnceCell<usize> = OnceCell::new();
+
+#[cfg(target_arch = "x86_64")]
+const CONTEXT_DEBUG_REGISTERS: u32 = 0x0010_0010;
+#[cfg(target_arch = "x86")]
+const CONTEXT_DEBUG_REGISTERS: u32 = 0x0001_0010;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -41,6 +51,16 @@ const PEB_BEING_DEBUGGED_OFFSET: usize = 0x02;
 const TEB_CLIENT_ID_OFFSET: usize = 0x40;
 #[cfg(target_arch = "x86")]
 const TEB_CLIENT_ID_OFFSET: usize = 0x20;
+
+#[cfg(target_arch = "x86_64")]
+const TEB_STACK_BASE_OFFSET: usize = 0x08;
+#[cfg(target_arch = "x86")]
+const TEB_STACK_BASE_OFFSET: usize = 0x04;
+
+#[cfg(target_arch = "x86_64")]
+const TEB_STACK_LIMIT_OFFSET: usize = 0x10;
+#[cfg(target_arch = "x86")]
+const TEB_STACK_LIMIT_OFFSET: usize = 0x08;
 
 fn read_peb() -> *const u8 {
     #[cfg(target_arch = "x86_64")]
@@ -175,6 +195,22 @@ fn read_teb() -> *const u8 {
 }
 
 #[inline(always)]
+fn stack_bounds() -> Option<(usize, usize)> {
+    let teb = read_teb();
+    if teb.is_null() {
+        return None;
+    }
+    unsafe {
+        let base = *(teb.add(TEB_STACK_BASE_OFFSET) as *const usize);
+        let limit = *(teb.add(TEB_STACK_LIMIT_OFFSET) as *const usize);
+        if base == 0 || limit == 0 || limit >= base {
+            return None;
+        }
+        Some((limit, base)) // [limit, base)
+    }
+}
+
+#[inline(always)]
 fn current_pid_tid() -> (u32, u32) {
     #[cfg(target_arch = "x86_64")]
     {
@@ -256,6 +292,54 @@ fn is_debugger_attached() -> bool {
     unsafe { *(peb.add(PEB_BEING_DEBUGGED_OFFSET) as *const u8) != 0 }
 }
 
+#[inline(always)]
+fn rtl_capture_context_ptr() -> Option<usize> {
+    if let Some(&p) = RTL_CAPTURE_CONTEXT.get() {
+        return if p == 0 { None } else { Some(p) };
+    }
+    let p = AbResolveNtdllStub("RtlCaptureContext").unwrap_or(0) as usize;
+    let _ = RTL_CAPTURE_CONTEXT.set(p);
+    if p == 0 { None } else { Some(p) }
+}
+
+#[inline(always)]
+fn capture_debug_context() -> Option<CONTEXT> {
+    let p = rtl_capture_context_ptr()?;
+    let f: extern "system" fn(*mut CONTEXT) = unsafe { core::mem::transmute(p as *const u8) };
+    let mut ctx = MaybeUninit::<CONTEXT>::zeroed();
+    unsafe {
+        (*ctx.as_mut_ptr()).ContextFlags =
+            windows::Win32::System::Diagnostics::Debug::CONTEXT_FLAGS(CONTEXT_DEBUG_REGISTERS);
+        f(ctx.as_mut_ptr());
+        Some(ctx.assume_init())
+    }
+}
+
+#[inline(always)]
+fn debug_regs_enabled(dr7: usize) -> bool {
+    (dr7 & 0xFF) != 0
+}
+
+#[inline(always)]
+fn hw_breakpoint_present(ctx: &CONTEXT) -> bool {
+    let dr7 = ctx.Dr7 as usize;
+    if !debug_regs_enabled(dr7) {
+        return false;
+    }
+    // Any enabled slot is suspicious, even if address is zeroed.
+    true
+}
+
+#[inline(always)]
+fn hw_breakpoint_on_stack(ctx: &CONTEXT) -> bool {
+    let (limit, base) = match stack_bounds() {
+        Some(v) => v,
+        None => return false,
+    };
+    let drs = [ctx.Dr0 as usize, ctx.Dr1 as usize, ctx.Dr2 as usize, ctx.Dr3 as usize];
+    drs.iter().any(|&dr| dr >= limit && dr < base)
+}
+
 #[inline(never)]
 fn terminate_hard() -> ! {
     #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
@@ -285,6 +369,26 @@ pub fn AbEvaluate() {
 
     if find_suspicious_return().is_some() {
         notify_violation(ViolationType::SuspiciousCaller);
+    }
+}
+
+/// Fast hardware-breakpoint detection (DR0-DR3/DR7) with stack-bound check.
+///
+/// Terminates immediately if any enabled hardware breakpoint is detected.
+#[inline(always)]
+pub fn AbCheckHWBP() {
+    let ctx = match capture_debug_context() {
+        Some(c) => c,
+        None => return,
+    };
+
+    if !debug_regs_enabled(ctx.Dr7 as usize) {
+        return;
+    }
+
+    if hw_breakpoint_present(&ctx) || hw_breakpoint_on_stack(&ctx) {
+        notify_violation(ViolationType::HardwareBreakpoint);
+        terminate_hard();
     }
 }
 
